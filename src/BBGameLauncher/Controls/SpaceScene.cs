@@ -16,6 +16,9 @@ public sealed class SpaceScene : FrameworkElement
     private double _motionElapsed;
     private double _highlightStarted = -10;
     private int _selectedCube;
+    private int _pendingCubeCount;
+    private int _pendingSelectedCube;
+    private bool _hasPendingCubeSet;
     private CubeMotion _motion;
     private bool _forwardTransition;
 
@@ -34,9 +37,24 @@ public sealed class SpaceScene : FrameworkElement
         if (selectedIndex != _selectedCube || rebuilding)
             _highlightStarted = _elapsed;
         _selectedCube = Math.Clamp(selectedIndex, 0, Math.Max(0, menuItemCount - 1));
-        if (!rebuilding)
-            return;
+        if (!rebuilding) return;
 
+        RebuildCubes(menuItemCount);
+        InvalidateVisual();
+    }
+
+    public void BeginCubeTransition(bool forward, int incomingCubeCount, int incomingSelectedIndex)
+    {
+        _forwardTransition = forward;
+        _pendingCubeCount = Math.Max(0, incomingCubeCount);
+        _pendingSelectedCube = Math.Clamp(incomingSelectedIndex, 0, Math.Max(0, _pendingCubeCount - 1));
+        _hasPendingCubeSet = true;
+        _motion = CubeMotion.Exiting;
+        _motionElapsed = 0;
+    }
+
+    private void RebuildCubes(int menuItemCount)
+    {
         _cubes.Clear();
         var placements = new[]
         {
@@ -48,21 +66,6 @@ public sealed class SpaceScene : FrameworkElement
             var p = placements[i % placements.Length];
             _cubes.Add(new Cube(p.Item1, p.Item2, p.Item3, i * .73, .24 + (i % 4) * .05));
         }
-        InvalidateVisual();
-    }
-
-    public void BeginCubeExit(bool forward)
-    {
-        _motion = CubeMotion.Exiting;
-        _motionElapsed = 0;
-        _forwardTransition = forward;
-    }
-
-    public void BeginCubeEnter(bool forward)
-    {
-        _motion = CubeMotion.Entering;
-        _motionElapsed = 0;
-        _forwardTransition = forward;
     }
 
     protected override void OnRender(DrawingContext dc)
@@ -109,24 +112,39 @@ public sealed class SpaceScene : FrameworkElement
     {
         var transition = Math.Clamp(_motionElapsed / .42, 0, 1);
         var eased = 1 - Math.Pow(1 - transition, 3);
-        var travel = _motion switch
-        {
-            CubeMotion.Exiting => eased,
-            CubeMotion.Entering => 1 - eased,
-            _ => 0
-        };
         var opacity = _motion switch
         {
             CubeMotion.Exiting => 1 - eased,
             CubeMotion.Entering => eased,
             _ => 1
         };
-        var direction = _forwardTransition ? 1 : -1;
         var bob = Math.Sin(_elapsed * cube.Speed + cube.Phase) * 18;
-        var center = new Point(
-            cube.X * RenderSize.Width + Math.Cos(_elapsed * cube.Speed + cube.Phase) * 18 + direction * travel * RenderSize.Width * .23,
-            cube.Y * RenderSize.Height + bob - travel * RenderSize.Height * .075);
-        var size = cube.Size * (1 + Math.Sin(_elapsed * .6 + cube.Phase) * .08) * (highlighted ? 1.12 : 1) * (1 + travel * .55);
+        var baseCenter = new Point(cube.X * RenderSize.Width + Math.Cos(_elapsed * cube.Speed + cube.Phase) * 18,
+            cube.Y * RenderSize.Height + bob);
+        var viewportCenter = new Point(RenderSize.Width * .5, RenderSize.Height * .5);
+        var center = baseCenter;
+        var zoom = 1d;
+        if (_motion == CubeMotion.Exiting && _forwardTransition)
+        {
+            center += (baseCenter - viewportCenter) * (eased * 3.4);
+            zoom = 1 + eased * 7;
+        }
+        else if (_motion == CubeMotion.Exiting)
+        {
+            center = Lerp(baseCenter, viewportCenter, eased);
+            zoom = 1 - eased * .94;
+        }
+        else if (_motion == CubeMotion.Entering && _forwardTransition)
+        {
+            center = Lerp(viewportCenter, baseCenter, eased);
+            zoom = .045 + eased * .955;
+        }
+        else if (_motion == CubeMotion.Entering)
+        {
+            center = Lerp(viewportCenter, baseCenter, eased);
+            zoom = 7 * (1 - eased) + eased;
+        }
+        var size = cube.Size * (1 + Math.Sin(_elapsed * .6 + cube.Phase) * .08) * (highlighted ? 1.12 : 1) * zoom;
 
         if (highlighted && opacity > 0)
         {
@@ -137,10 +155,11 @@ public sealed class SpaceScene : FrameworkElement
         }
 
         var flickAge = Math.Max(0, _elapsed - _highlightStarted);
-        var flick = highlighted ? Math.Sin(flickAge * 10.5) * Math.Exp(-flickAge * 2.7) * .92 : 0;
-        var ax = _elapsed * (.075 + cube.Speed * .045) + cube.Phase + flick * .72;
-        var ay = _elapsed * (.052 + cube.Speed * .035) + cube.Phase * 1.7 + flick;
-        var az = _elapsed * (.014 + cube.Speed * .012) + cube.Phase + flick * .18;
+        // A decaying angular velocity: the cube makes one quick extra turn, then returns to its slow idle spin.
+        var flickRotation = highlighted ? (1 - Math.Exp(-flickAge * 3.1)) * 1.45 : 0;
+        var ax = _elapsed * (.075 + cube.Speed * .045) + cube.Phase + flickRotation * .72;
+        var ay = _elapsed * (.052 + cube.Speed * .035) + cube.Phase * 1.7 + flickRotation;
+        var az = _elapsed * (.014 + cube.Speed * .012) + cube.Phase + flickRotation * .18;
         var vertices = new[]
         {
             new Point3(-1, -1, -1), new Point3(1, -1, -1), new Point3(1, 1, -1), new Point3(-1, 1, -1),
@@ -168,7 +187,16 @@ public sealed class SpaceScene : FrameworkElement
             var tint = Blend(face.Tint, Color.FromRgb(170, 236, 255), transmission * .22);
             var fill = new SolidColorBrush(Color.FromArgb(alpha, face.Tint.R, face.Tint.G, face.Tint.B));
             fill.Color = Color.FromArgb(alpha, tint.R, tint.G, tint.B);
-            dc.DrawGeometry(fill, null, Polygon(face.Indices.Select(index => projected[index]).ToArray()));
+            var facePoints = face.Indices.Select(index => projected[index]).ToArray();
+            dc.DrawGeometry(fill, null, Polygon(facePoints));
+
+            // Screen-space refraction: transmit each face through the IOR-dependent bend before it exits the prism.
+            var bend = (1 - 1 / GlassIor) * size * (1 - facing) * .92;
+            var refractedPoints = facePoints.Select(point => point + new Vector(normal.X * bend, normal.Y * bend)).ToArray();
+            var refractedAlpha = (byte)(opacity * transmission * (highlighted ? 44 : 24));
+            dc.DrawGeometry(new SolidColorBrush(Color.FromArgb(refractedAlpha, 173, 239, 255)), null, Polygon(refractedPoints));
+            if (fresnel > .08)
+                dc.DrawGeometry(null, new Pen(new SolidColorBrush(Color.FromArgb((byte)(opacity * fresnel * 210), 220, 251, 255)), 1), Polygon(refractedPoints));
         }
 
         var edgeAlpha = (byte)(opacity * (highlighted ? 235 : 145));
@@ -198,6 +226,10 @@ public sealed class SpaceScene : FrameworkElement
         var perspective = size * 2.1 / (4.3 - p.Z);
         return new Point(center.X + p.X * perspective, center.Y + p.Y * perspective);
     }
+
+    private static Point Lerp(Point from, Point to, double amount) => new(
+        from.X + (to.X - from.X) * amount,
+        from.Y + (to.Y - from.Y) * amount);
 
     private static Point3 FaceNormal(Point3 a, Point3 b, Point3 c)
     {
@@ -234,7 +266,22 @@ public sealed class SpaceScene : FrameworkElement
                 if (_motion != CubeMotion.None)
                 {
                     _motionElapsed += delta;
-                    if (_motionElapsed >= .42) _motion = CubeMotion.None;
+                    if (_motionElapsed >= .42 && _motion == CubeMotion.Exiting)
+                    {
+                        if (_hasPendingCubeSet)
+                        {
+                            _selectedCube = _pendingSelectedCube;
+                            _highlightStarted = _elapsed;
+                            RebuildCubes(_pendingCubeCount);
+                            _hasPendingCubeSet = false;
+                        }
+                        _motion = CubeMotion.Entering;
+                        _motionElapsed = 0;
+                    }
+                    else if (_motionElapsed >= .42)
+                    {
+                        _motion = CubeMotion.None;
+                    }
                 }
             }
             _lastFrame = args.RenderingTime;

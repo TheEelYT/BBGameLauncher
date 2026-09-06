@@ -178,6 +178,11 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
         e.Context.PSSetSampler(3, _sceneSampler);
         e.Context.Draw(3, 0);
 
+        // The fullscreen composite occupies depth 0. Clear it before drawing
+        // the perspective cubes or every cube fragment fails the depth test.
+        if (e.Surface.DepthStencilView != null)
+            e.Context.ClearDepthStencilView(e.Surface.DepthStencilView, DepthStencilClearFlags.Depth, 1, 0);
+
         e.Context.OMSetBlendState(_glassBlend);
         e.Context.OMSetDepthStencilState(null);
         e.Context.RSSetState(_rasterizer);

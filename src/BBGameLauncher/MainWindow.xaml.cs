@@ -3,6 +3,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
+using System.Windows.Threading;
 
 namespace BBGameLauncher;
 
@@ -40,21 +41,20 @@ public partial class MainWindow : Window
 
     private void ShowRootMenu()
     {
-        _inSettings = false;
-        _activeItems = _rootItems;
-        _selectedIndex = 0;
-        HintText.Text = "MAIN MENU";
-        DetailPanel.Child = null;
-        SetDetailVisibility(false);
-        RenderMenu();
+        ApplyMenuState(_rootItems, settings: false);
     }
 
     private void ShowSettingsMenu()
     {
-        _inSettings = true;
-        _activeItems = _settingsItems;
+        ApplyMenuState(_settingsItems, settings: true);
+    }
+
+    private void ApplyMenuState(List<LauncherMenuItem> items, bool settings)
+    {
+        _inSettings = settings;
+        _activeItems = items;
         _selectedIndex = 0;
-        HintText.Text = "SYSTEM SETTINGS";
+        HintText.Text = settings ? "SYSTEM SETTINGS" : "MAIN MENU";
         DetailPanel.Child = null;
         SetDetailVisibility(false);
         RenderMenu();
@@ -128,7 +128,7 @@ public partial class MainWindow : Window
         var item = _activeItems[_selectedIndex];
         if (!_inSettings && item.Title == "System Settings")
         {
-            TransitionToMenu(forward: true, ShowSettingsMenu);
+            TransitionToMenu(forward: true, destinationIsSettings: true);
             return;
         }
 
@@ -187,25 +187,31 @@ public partial class MainWindow : Window
         DetailPanel.BeginAnimation(OpacityProperty, fade);
     }
 
-    private void TransitionToMenu(bool forward, Action showNextMenu)
+    private void TransitionToMenu(bool forward, bool destinationIsSettings)
     {
         if (_isMenuTransition) return;
         _isMenuTransition = true;
-        Scene.BeginCubeExit(forward);
+        var incomingItems = destinationIsSettings ? _settingsItems : _rootItems;
+        Scene.BeginCubeTransition(forward, incomingItems.Count, 0);
 
-        var fadeOut = new DoubleAnimation(1, 0, TimeSpan.FromMilliseconds(420));
+        var fadeOut = new DoubleAnimation(1, 0, TimeSpan.FromMilliseconds(250));
         fadeOut.Completed += (_, _) =>
         {
             ContentArea.BeginAnimation(OpacityProperty, null);
             ContentArea.Opacity = 0;
-            showNextMenu();
-            Scene.BeginCubeEnter(forward);
+        };
+        ContentArea.BeginAnimation(OpacityProperty, fadeOut);
 
-            var fadeIn = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(440));
+        var incomingDelay = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(460) };
+        incomingDelay.Tick += (_, _) =>
+        {
+            incomingDelay.Stop();
+            ApplyMenuState(incomingItems, destinationIsSettings);
+            var fadeIn = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(340));
             fadeIn.Completed += (_, _) => _isMenuTransition = false;
             ContentArea.BeginAnimation(OpacityProperty, fadeIn);
         };
-        ContentArea.BeginAnimation(OpacityProperty, fadeOut);
+        incomingDelay.Start();
     }
 
     private void Window_KeyDown(object sender, KeyEventArgs e)
@@ -222,7 +228,7 @@ public partial class MainWindow : Window
                 ActivateSelected();
                 break;
             case Key.Escape:
-                if (_inSettings) TransitionToMenu(forward: false, ShowRootMenu); else if (_isFullscreen) ToggleFullscreen();
+                if (_inSettings) TransitionToMenu(forward: false, destinationIsSettings: false); else if (_isFullscreen) ToggleFullscreen();
                 break;
             case Key.F11:
                 ToggleFullscreen();

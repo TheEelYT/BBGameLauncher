@@ -106,19 +106,19 @@ internal sealed class StartupVisual : FrameworkElement
         var head = Math.Clamp((_elapsed - trail * .14) / 2.6, 0, 1);
         if (head <= 0) return;
 
-        var start = Math.Max(0, head - .38);
+        var start = Math.Max(0, head - .24);
         var points = new List<Point>();
         for (var i = 0; i <= 32; i++)
             points.Add(TrailPoint(center, trail, start + (head - start) * i / 32));
 
-        var line = new StreamGeometry();
-        using (var context = line.Open())
-        {
-            context.BeginFigure(points[0], false, false);
-            context.PolyLineTo(points.Skip(1).ToArray(), true, false);
-        }
         var trailOpacity = Math.Min(1, head * 4) * (1 - Math.Max(0, _elapsed - 4.5) / 1.2);
-        dc.DrawGeometry(null, new Pen(new SolidColorBrush(Color.FromArgb((byte)(trailOpacity * 82), colour.R, colour.G, colour.B)), 1.15), line);
+        for (var segment = 1; segment < points.Count; segment++)
+        {
+            var progressAlongTail = (double)segment / (points.Count - 1);
+            var alpha = (byte)(trailOpacity * 78 * progressAlongTail * progressAlongTail);
+            dc.DrawLine(new Pen(new SolidColorBrush(Color.FromArgb(alpha, colour.R, colour.G, colour.B)), 1.1),
+                points[segment - 1], points[segment]);
+        }
 
         for (var bead = 0; bead < 8; bead++)
         {

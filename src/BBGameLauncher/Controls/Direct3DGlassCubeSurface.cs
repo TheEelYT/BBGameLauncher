@@ -26,6 +26,13 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
     private ID3D11Texture2D? _environment;
     private ID3D11ShaderResourceView? _environmentView;
     private ID3D11SamplerState? _environmentSampler;
+    private byte[]? _backdropPixels;
+    private int _backdropWidth;
+    private int _backdropHeight;
+    private bool _backdropDirty;
+    private ID3D11Texture2D? _backdrop;
+    private ID3D11ShaderResourceView? _backdropView;
+    private ID3D11SamplerState? _backdropSampler;
     private ID3D11BlendState? _glassBlend;
     private ID3D11RasterizerState? _rasterizer;
 
@@ -41,6 +48,14 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
     {
         _cubes = cubes;
         Invalidate();
+    }
+
+    public void SetBackdrop(byte[] pixels, int width, int height)
+    {
+        _backdropPixels = pixels;
+        _backdropWidth = width;
+        _backdropHeight = height;
+        _backdropDirty = true;
     }
 
     private void OnLoadContent(object? sender, DrawingSurfaceEventArgs e)
@@ -65,6 +80,8 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
         _environment = CreateEnvironmentMap(e.Device, e.Context);
         _environmentView = e.Device.CreateShaderResourceView(_environment);
         _environmentSampler = e.Device.CreateSamplerState(SamplerDescription.LinearClamp);
+        _backdropSampler = e.Device.CreateSamplerState(SamplerDescription.LinearClamp);
+        UploadBackdrop(e.Device, e.Context);
         _glassBlend = e.Device.CreateBlendState(BlendDescription.AlphaBlend);
         _rasterizer = e.Device.CreateRasterizerState(RasterizerDescription.CullNone);
     }
@@ -75,7 +92,8 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
         if (e.Surface.DepthStencilView != null)
             e.Context.ClearDepthStencilView(e.Surface.DepthStencilView, DepthStencilClearFlags.Depth, 1, 0);
         if (_vertices == null || _frameConstants == null || _objectConstants == null || _environmentView == null ||
-            _environmentSampler == null || _vertexShader == null || _pixelShader == null || _inputLayout == null)
+            _environmentSampler == null || _backdropView == null || _backdropSampler == null ||
+            _vertexShader == null || _pixelShader == null || _inputLayout == null)
             return;
 
         var width = Math.Max(1, e.Surface.TextureWidth);
@@ -85,7 +103,13 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
         var camera = new Vector3(0, 0, -cameraDistance);
         var view = Matrix4x4.CreateLookAt(camera, Vector3.Zero, Vector3.UnitY);
         var projection = Matrix4x4.CreatePerspectiveFieldOfView(fieldOfView, width / (float)height, 1f, 8000f);
-        e.Context.UpdateSubresource(new FrameConstants { ViewProjection = view * projection, Camera = new Vector4(camera, 0) }, _frameConstants);
+        if (_backdropDirty) UploadBackdrop(e.Device, e.Context);
+        e.Context.UpdateSubresource(new FrameConstants
+        {
+            ViewProjection = view * projection,
+            Camera = new Vector4(camera, 0),
+            Viewport = new Vector4(width, height, 1f / width, 1f / height)
+        }, _frameConstants);
 
         e.Context.OMSetBlendState(_glassBlend);
         e.Context.OMSetDepthStencilState(null);
@@ -100,6 +124,8 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
         e.Context.PSSetConstantBuffer(1, _objectConstants);
         e.Context.PSSetShaderResource(0, _environmentView);
         e.Context.PSSetSampler(0, _environmentSampler);
+        e.Context.PSSetShaderResource(1, _backdropView);
+        e.Context.PSSetSampler(1, _backdropSampler);
 
         // Keeping one stable, frame-level order avoids the face-bucket pop the
         // old WPF implementation exhibited when rotating through a face plane.
@@ -109,9 +135,11 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
             var position = new Vector3(cube.X - width * .5f, height * .5f - cube.Y, 0);
             var rotation = Matrix4x4.CreateRotationX(cube.AngleX) * Matrix4x4.CreateRotationY(cube.AngleY) * Matrix4x4.CreateRotationZ(cube.AngleZ);
             var world = Matrix4x4.CreateScale(cube.Size) * rotation * Matrix4x4.CreateTranslation(position);
+            Matrix4x4.Invert(world, out var inverseWorld);
             e.Context.UpdateSubresource(new ObjectConstants
             {
                 World = world,
+                InverseWorld = inverseWorld,
                 Material = new Vector4(cube.Selected ? 1 : 0, cube.Opacity, cube.Size, 0)
             }, _objectConstants);
             e.Context.Draw(36, 0);
@@ -129,6 +157,9 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
         _environmentSampler?.Dispose(); _environmentSampler = null;
         _environmentView?.Dispose(); _environmentView = null;
         _environment?.Dispose(); _environment = null;
+        _backdropSampler?.Dispose(); _backdropSampler = null;
+        _backdropView?.Dispose(); _backdropView = null;
+        _backdrop?.Dispose(); _backdrop = null;
         _glassBlend?.Dispose(); _glassBlend = null;
         _rasterizer?.Dispose(); _rasterizer = null;
     }
@@ -152,16 +183,41 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
             {
                 var u = x / (float)(size - 1) * 2 - 1;
                 var v = y / (float)(size - 1) * 2 - 1;
-                var bloom = MathF.Exp(-((u - (face == 2 ? -.35f : .45f)) * (u - (face == 2 ? -.35f : .45f)) + (v + .16f) * (v + .16f)) * 2.5f);
-                var star = random.NextDouble() > .992 ? 1f : 0f;
-                var red = (byte)Math.Clamp(3 + bloom * 23 + star * 126, 0, 255);
-                var green = (byte)Math.Clamp(9 + bloom * 64 + star * 162, 0, 255);
-                var blue = (byte)Math.Clamp(24 + bloom * 118 + star * 190, 0, 255);
+                // A quiet sky-like environment: point lights stay localized in
+                // reflections instead of becoming broad bands across a face.
+                var haze = MathF.Exp(-((u - (face == 2 ? -.32f : .44f)) * (u - (face == 2 ? -.32f : .44f)) + (v + .16f) * (v + .16f)) * 8f);
+                var star = random.NextDouble() > .9987 ? 1f : 0f;
+                var red = (byte)Math.Clamp(2 + haze * 8 + star * 176, 0, 255);
+                var green = (byte)Math.Clamp(7 + haze * 25 + star * 198, 0, 255);
+                var blue = (byte)Math.Clamp(18 + haze * 52 + star * 220, 0, 255);
                 pixels[y * size + x] = 0xff000000u | ((uint)red << 16) | ((uint)green << 8) | blue;
             }
             context.UpdateSubresource(pixels, texture, (uint)face, size * sizeof(uint));
         }
         return texture;
+    }
+
+    private void UploadBackdrop(ID3D11Device device, ID3D11DeviceContext context)
+    {
+        var width = Math.Max(1, _backdropWidth);
+        var height = Math.Max(1, _backdropHeight);
+        if (_backdrop == null || _backdrop.Description.Width != (uint)width || _backdrop.Description.Height != (uint)height)
+        {
+            _backdropView?.Dispose();
+            _backdrop?.Dispose();
+            _backdrop = device.CreateTexture2D(new Texture2DDescription
+            {
+                Width = (uint)width, Height = (uint)height, ArraySize = 1, MipLevels = 1,
+                Format = Format.B8G8R8A8_UNorm, BindFlags = BindFlags.ShaderResource,
+                Usage = ResourceUsage.Default, CPUAccessFlags = CpuAccessFlags.None,
+                SampleDescription = new SampleDescription(1, 0)
+            });
+            _backdropView = device.CreateShaderResourceView(_backdrop);
+        }
+
+        var pixels = _backdropPixels ?? new byte[] { 0, 0, 0, 255 };
+        context.UpdateSubresource(pixels, _backdrop, 0, (uint)(width * 4));
+        _backdropDirty = false;
     }
 
     private static CubeVertex[] CreateCubeVertices()
@@ -182,8 +238,8 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
     }
 
     [StructLayout(LayoutKind.Sequential)] private struct CubeVertex { public Vector3 Position; public Vector3 Normal; }
-    [StructLayout(LayoutKind.Sequential)] private struct FrameConstants { public Matrix4x4 ViewProjection; public Vector4 Camera; }
-    [StructLayout(LayoutKind.Sequential)] private struct ObjectConstants { public Matrix4x4 World; public Vector4 Material; }
+    [StructLayout(LayoutKind.Sequential)] private struct FrameConstants { public Matrix4x4 ViewProjection; public Vector4 Camera; public Vector4 Viewport; }
+    [StructLayout(LayoutKind.Sequential)] private struct ObjectConstants { public Matrix4x4 World; public Matrix4x4 InverseWorld; public Vector4 Material; }
 }
 
 public readonly record struct GlassCubeFrame(float X, float Y, float Size, float AngleX, float AngleY, float AngleZ, bool Selected, float Opacity);

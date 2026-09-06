@@ -1,5 +1,6 @@
 using System.Windows;
 using System.Windows.Media;
+using System.Windows.Media.Imaging;
 
 namespace BBGameLauncher.Controls;
 
@@ -20,6 +21,10 @@ public sealed class SpaceScene : FrameworkElement
     private bool _hasPendingCubeSet;
     private CubeMotion _motion;
     private bool _forwardTransition;
+    private byte[]? _backdropPixels;
+    private int _backdropWidth;
+    private int _backdropHeight;
+    private double _lastBackdropCapture = -1;
 
     public SpaceScene()
     {
@@ -78,6 +83,8 @@ public sealed class SpaceScene : FrameworkElement
                 new Point(star.X * RenderSize.Width, star.Y * RenderSize.Height), star.Size, star.Size);
         }
 
+        UpdateBackdropCapture();
+
         _glassSurface.SetCubes(_cubes.Select((cube, index) =>
         {
             var (center, size, opacity) = GetCubePresentation(cube, index == _selectedCube);
@@ -88,6 +95,39 @@ public sealed class SpaceScene : FrameworkElement
 
         dc.DrawRectangle(null, new Pen(new SolidColorBrush(Color.FromArgb(42, 101, 168, 240)), 1),
             new Rect(.5, .5, Math.Max(0, RenderSize.Width - 1), Math.Max(0, RenderSize.Height - 1)));
+    }
+
+    private void UpdateBackdropCapture()
+    {
+        if (RenderSize.Width <= 0 || RenderSize.Height <= 0 || _elapsed - _lastBackdropCapture < .1)
+            return;
+
+        var dpi = VisualTreeHelper.GetDpi(this);
+        var width = Math.Max(1, (int)Math.Ceiling(RenderSize.Width * dpi.DpiScaleX));
+        var height = Math.Max(1, (int)Math.Ceiling(RenderSize.Height * dpi.DpiScaleY));
+        var visual = new DrawingVisual();
+        using (var dc = visual.RenderOpen())
+        {
+            dc.DrawRectangle(new LinearGradientBrush(Color.FromRgb(1, 4, 12), Color.FromRgb(2, 8, 19), 90), null, new Rect(RenderSize));
+            DrawNebula(dc, new Point(RenderSize.Width * .2, RenderSize.Height * .46), RenderSize.Width * .48, Color.FromArgb(113, 67, 69, 195));
+            DrawNebula(dc, new Point(RenderSize.Width * .79, RenderSize.Height * .23), RenderSize.Width * .36, Color.FromArgb(48, 22, 71, 133));
+            DrawNebula(dc, new Point(RenderSize.Width * .68, RenderSize.Height * .72), RenderSize.Width * .31, Color.FromArgb(32, 3, 72, 132));
+            foreach (var star in _stars)
+            {
+                var shimmer = .35 + (Math.Sin(_elapsed * star.Twinkle + star.Phase) + 1) * .17;
+                dc.DrawEllipse(new SolidColorBrush(Color.FromArgb((byte)(255 * shimmer), 140, 204, 255)), null,
+                    new Point(star.X * RenderSize.Width, star.Y * RenderSize.Height), star.Size, star.Size);
+            }
+        }
+
+        var snapshot = new RenderTargetBitmap(width, height, dpi.PixelsPerInchX, dpi.PixelsPerInchY, PixelFormats.Pbgra32);
+        snapshot.Render(visual);
+        _backdropPixels = new byte[width * height * 4];
+        snapshot.CopyPixels(_backdropPixels, width * 4, 0);
+        _backdropWidth = width;
+        _backdropHeight = height;
+        _lastBackdropCapture = _elapsed;
+        _glassSurface.SetBackdrop(_backdropPixels, width, height);
     }
 
     private (Point Center, double Size, double Opacity) GetCubePresentation(Cube cube, bool highlighted)

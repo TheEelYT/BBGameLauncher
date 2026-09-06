@@ -229,13 +229,12 @@ public sealed class SpaceScene : FrameworkElement
             var facing = Math.Clamp(Math.Abs(normal.Z), 0, 1);
             var fresnel = GlassF0 + (1 - GlassF0) * Math.Pow(1 - facing, 5);
             var transmission = 1 - fresnel;
-            // The shader below this overlay is the actual scene refraction.
-            // Keep this surface tint deliberately light so it still reads as
-            // glass rather than returning to the old opaque blue plastic look.
-            var alpha = (byte)(opacity * (highlighted ? 18 + fresnel * 42 : 10 + fresnel * 25));
+            // The shader below this overlay refracts the scene. These layered,
+            // transparent face fills give that refraction a visible glass body
+            // and internal reflections instead of leaving it as a wireframe.
+            var alpha = (byte)(opacity * (highlighted ? 78 + fresnel * 82 : 50 + fresnel * 58));
             var tint = Blend(face.Tint, Color.FromRgb(170, 236, 255), transmission * .15);
-            var fill = new SolidColorBrush(Color.FromArgb(alpha, face.Tint.R, face.Tint.G, face.Tint.B));
-            fill.Color = Color.FromArgb(alpha, tint.R, tint.G, tint.B);
+            var fill = GlassFaceBrush(tint, alpha, fresnel);
             var facePoints = face.Indices.Select(index => projected[index]).ToArray();
             dc.DrawGeometry(fill, null, Polygon(facePoints));
 
@@ -355,6 +354,27 @@ public sealed class SpaceScene : FrameworkElement
         (byte)(from.G + (to.G - from.G) * amount),
         (byte)(from.B + (to.B - from.B) * amount));
 
+    private static LinearGradientBrush GlassFaceBrush(Color tint, byte alpha, double fresnel)
+    {
+        static byte Scale(byte value, double amount) => (byte)Math.Clamp(value * amount, 0, 255);
+
+        var highlight = Color.FromArgb(Scale(alpha, .68 + fresnel * .26), 185, 239, 255);
+        var body = Color.FromArgb(Scale(alpha, .74), tint.R, tint.G, tint.B);
+        var clearCore = Color.FromArgb(Scale(alpha, .24), tint.R, tint.G, tint.B);
+        var returnReflection = Color.FromArgb(Scale(alpha, .54 + fresnel * .2), 120, 212, 255);
+        var brush = new LinearGradientBrush
+        {
+            StartPoint = new Point(0, 0),
+            EndPoint = new Point(1, 1)
+        };
+        brush.GradientStops.Add(new GradientStop(highlight, 0));
+        brush.GradientStops.Add(new GradientStop(body, .24));
+        brush.GradientStops.Add(new GradientStop(clearCore, .58));
+        brush.GradientStops.Add(new GradientStop(returnReflection, 1));
+        brush.Freeze();
+        return brush;
+    }
+
     private static StreamGeometry Polygon(params Point[] points)
     {
         var geometry = new StreamGeometry();
@@ -448,7 +468,7 @@ public sealed class SpaceScene : FrameworkElement
             _glass.TextureSize = new Point(Math.Max(1, ActualWidth), Math.Max(1, ActualHeight));
             _glass.GlassCenter = center;
             _glass.GlassSize = new Point(Math.Max(1, size * 2.3), Math.Max(1, size * 2.3));
-            _glass.BlurIntensity = highlighted ? .90f : .68f;
+            _glass.BlurIntensity = highlighted ? 2.0f : 1.45f;
             InvalidateVisual();
         }
 

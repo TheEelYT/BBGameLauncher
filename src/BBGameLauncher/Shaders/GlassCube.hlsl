@@ -161,6 +161,27 @@ float2 ProjectToUv(float3 worldPosition)
     return clip.xy / clip.w * float2(0.5, -0.5) + 0.5;
 }
 
+float3 SampleSceneRay(float3 surfacePosition, float3 outgoingDirection, float cubeSize)
+{
+    float2 surfaceUv = ProjectToUv(surfacePosition);
+    float2 rayUv = saturate(ProjectToUv(surfacePosition + outgoingDirection * cubeSize * 1.35));
+    float2 dispersion = (rayUv - surfaceUv) * 0.035;
+    float3 scene;
+    scene.r = SceneBackdrop.Sample(SceneSampler, saturate(rayUv + dispersion)).r;
+    scene.g = SceneBackdrop.Sample(SceneSampler, rayUv).g;
+    scene.b = SceneBackdrop.Sample(SceneSampler, saturate(rayUv - dispersion)).b;
+    return scene;
+}
+
+float SurfaceEdgeFactor(float3 localPosition)
+{
+    float3 coordinates = abs(localPosition);
+    float largest = max(coordinates.x, max(coordinates.y, coordinates.z));
+    float smallest = min(coordinates.x, min(coordinates.y, coordinates.z));
+    float middle = coordinates.x + coordinates.y + coordinates.z - largest - smallest;
+    return smoothstep(0.62, 0.96, middle);
+}
+
 float4 PSMain(PSInput input) : SV_TARGET
 {
     const float glassIor = 1.50;
@@ -180,25 +201,33 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 worldExit = mul(float4(localExit, 1), World).xyz;
     float3 exitNormal = normalize(mul(float4(localExitNormal, 0), World).xyz);
 
-    // Bend the ray back into air at the opposite face. Total internal
-    // reflection falls back to a reflected internal ray instead of vanishing.
-    float3 outgoing = refract(glassDirection, -exitNormal, glassIor);
-    float transmittedRay = step(0.00001, dot(outgoing, outgoing));
-    outgoing = normalize(lerp(reflect(glassDirection, exitNormal), outgoing, transmittedRay));
+    // First attempt to leave the block through the rear face.
+    float3 primaryOutgoing = refract(glassDirection, -exitNormal, glassIor);
+    float primaryTransmission = step(0.00001, dot(primaryOutgoing, primaryOutgoing));
+    float3 safePrimaryOutgoing = normalize(primaryOutgoing + exitNormal * (1.0 - primaryTransmission));
+    float3 primaryScene = SampleSceneRay(worldExit, safePrimaryOutgoing, Material.z);
 
-    // Project the actual exit ray into the already-rendered 3D starfield.
-    // This keeps stars localized instead of stretching one texture over a face.
-    float3 samplePoint = worldExit + outgoing * Material.z * 1.35;
-    float2 refractedUv = saturate(ProjectToUv(samplePoint));
-    float2 dispersion = (refractedUv - ProjectToUv(worldExit)) * 0.035;
-    float3 transmission;
-    transmission.r = SceneBackdrop.Sample(SceneSampler, saturate(refractedUv + dispersion)).r;
-    transmission.g = SceneBackdrop.Sample(SceneSampler, refractedUv).g;
-    transmission.b = SceneBackdrop.Sample(SceneSampler, saturate(refractedUv - dispersion)).b;
+    // Trace one physically meaningful internal bounce. This makes the rear and
+    // side surfaces contribute through the front instead of drawing them as
+    // separately blended panes.
+    float3 bounceLocalDirection = normalize(reflect(localDirection, localExitNormal));
+    float3 bounceLocalOrigin = localExit - localExitNormal * 0.002;
+    float bounceDistance = BoxExitDistance(bounceLocalOrigin, bounceLocalDirection);
+    float3 bounceLocalExit = bounceLocalOrigin + bounceLocalDirection * bounceDistance;
+    float3 bounceLocalNormal = BoxNormal(bounceLocalExit);
+    float3 bounceWorldExit = mul(float4(bounceLocalExit, 1), World).xyz;
+    float3 bounceWorldNormal = normalize(mul(float4(bounceLocalNormal, 0), World).xyz);
+    float3 bounceWorldDirection = normalize(mul(float4(bounceLocalDirection, 0), World).xyz);
+    float3 bounceOutgoing = refract(bounceWorldDirection, -bounceWorldNormal, glassIor);
+    float bounceTransmission = step(0.00001, dot(bounceOutgoing, bounceOutgoing));
+    float3 safeBounceOutgoing = normalize(bounceOutgoing + bounceWorldNormal * (1.0 - bounceTransmission));
+    float3 bouncedScene = SampleSceneRay(bounceWorldExit, safeBounceOutgoing, Material.z);
+    float3 bounceEnvironment = EnvironmentMap.Sample(EnvironmentSampler,
+        reflect(bounceWorldDirection, bounceWorldNormal)).rgb;
+    bouncedScene = lerp(bounceEnvironment, bouncedScene, bounceTransmission);
 
     float3 reflectedDirection = reflect(incident, entryNormal);
     float3 reflection = EnvironmentMap.Sample(EnvironmentSampler, reflectedDirection).rgb;
-    float3 internalReflection = EnvironmentMap.Sample(EnvironmentSampler, reflect(glassDirection, exitNormal)).rgb;
     float facing = saturate(dot(-incident, entryNormal));
     float fresnel = 0.035 + 0.965 * pow(1.0 - facing, 5.0);
     float exitFacing = saturate(dot(glassDirection, exitNormal));
@@ -206,10 +235,19 @@ float4 PSMain(PSInput input) : SV_TARGET
     float thickness = saturate(exitDistance / 3.464);
     float3 absorption = exp(-float3(0.13, 0.055, 0.018) * exitDistance);
 
-    float3 glass = transmission * absorption;
+    float bounceWeight = saturate(exitFresnel + (1.0 - primaryTransmission));
+    float3 transmission = lerp(primaryScene, bouncedScene, bounceWeight);
+
+    float3 glass = transmission * absorption * float3(0.90, 0.98, 1.07);
     glass = lerp(glass, reflection * 1.15, fresnel);
-    glass += internalReflection * (0.08 + exitFresnel * 0.24);
     glass += fresnel * float3(0.20, 0.48, 0.82);
+
+    // Broad edge caustics reveal both the entry surface and the refracted rear
+    // geometry without turning the object back into a wireframe.
+    float entryEdge = SurfaceEdgeFactor(input.LocalPosition);
+    float exitEdge = SurfaceEdgeFactor(localExit);
+    glass += entryEdge * (0.06 + fresnel * 0.18) * float3(0.22, 0.62, 1.0);
+    glass += exitEdge * (0.05 + exitFresnel * 0.16) * float3(0.16, 0.52, 0.92);
 
     // The selected light is evaluated along the ray segment inside the cube.
     // It therefore occupies the geometric centre without a separate sphere or
@@ -219,6 +257,6 @@ float4 PSMain(PSInput input) : SV_TARGET
     float coreGlow = Material.x * exp(-dot(closestPoint, closestPoint) * 7.5) * saturate(exitDistance * 0.55);
     glass += coreGlow * float3(0.015, 0.34, 1.25);
 
-    float opacity = Material.y * (0.24 + fresnel * 0.36 + thickness * 0.10);
+    float opacity = Material.y * (0.23 + fresnel * 0.38 + thickness * 0.10 + exitFresnel * 0.08);
     return float4(glass, opacity);
 }

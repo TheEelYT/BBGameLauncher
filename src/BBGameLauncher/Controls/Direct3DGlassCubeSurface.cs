@@ -17,6 +17,7 @@ namespace BBGameLauncher.Controls;
 public sealed class Direct3DGlassCubeSurface : DrawingSurface
 {
     private GlassCubeFrame[] _cubes = [];
+    private int _cubeVertexCount;
     private ID3D11Buffer? _vertices;
     private ID3D11Buffer? _frameConstants;
     private ID3D11Buffer? _objectConstants;
@@ -80,6 +81,7 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
     private void OnLoadContent(object? sender, DrawingSurfaceEventArgs e)
     {
         var vertices = CreateCubeVertices();
+        _cubeVertexCount = vertices.Length;
         _vertices = e.Device.CreateBuffer(vertices, BindFlags.VertexBuffer);
         _stars = e.Device.CreateBuffer(CreateStarVertices(), BindFlags.VertexBuffer);
         _frameConstants = e.Device.CreateBuffer(new BufferDescription((uint)Marshal.SizeOf<FrameConstants>(), BindFlags.ConstantBuffer));
@@ -222,7 +224,7 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
                 Material = new Vector4(cube.Selected ? 1 : 0, cube.Opacity, cube.Size, 0)
             }, _objectConstants);
 
-            e.Context.Draw(36, 0);
+            e.Context.Draw((uint)_cubeVertexCount, 0);
         }
     }
 
@@ -362,19 +364,50 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
 
     private static CubeVertex[] CreateCubeVertices()
     {
-        var p = new[]
-        {
-            new Vector3(-1,-1,-1), new Vector3(1,-1,-1), new Vector3(1,1,-1), new Vector3(-1,1,-1),
-            new Vector3(-1,-1,1), new Vector3(1,-1,1), new Vector3(1,1,1), new Vector3(-1,1,1)
-        };
+        const int segments = 10;
         var faces = new[]
         {
-            (new[] { 0, 1, 2, 3 }, new Vector3(0,0,-1)), (new[] { 5, 4, 7, 6 }, new Vector3(0,0,1)),
-            (new[] { 4, 0, 3, 7 }, new Vector3(-1,0,0)), (new[] { 1, 5, 6, 2 }, new Vector3(1,0,0)),
-            (new[] { 3, 2, 6, 7 }, new Vector3(0,1,0)), (new[] { 4, 5, 1, 0 }, new Vector3(0,-1,0))
+            (Vector3.UnitX, Vector3.UnitY, Vector3.UnitZ),
+            (-Vector3.UnitX, Vector3.UnitY, -Vector3.UnitZ),
+            (Vector3.UnitY, Vector3.UnitZ, Vector3.UnitX),
+            (-Vector3.UnitY, Vector3.UnitZ, -Vector3.UnitX),
+            (Vector3.UnitZ, Vector3.UnitX, Vector3.UnitY),
+            (-Vector3.UnitZ, Vector3.UnitX, -Vector3.UnitY)
         };
-        return faces.SelectMany(face => new[] { face.Item1[0], face.Item1[1], face.Item1[2], face.Item1[0], face.Item1[2], face.Item1[3] }
-            .Select(index => new CubeVertex { Position = p[index], Normal = face.Item2 })).ToArray();
+
+        var vertices = new List<CubeVertex>(faces.Length * segments * segments * 6);
+        foreach (var (faceNormal, tangent, bitangent) in faces)
+        {
+            for (var y = 0; y < segments; y++)
+            for (var x = 0; x < segments; x++)
+            {
+                var u0 = -1f + 2f * x / segments;
+                var u1 = -1f + 2f * (x + 1) / segments;
+                var v0 = -1f + 2f * y / segments;
+                var v1 = -1f + 2f * (y + 1) / segments;
+                var a = CreateRoundedCubeVertex(faceNormal + tangent * u0 + bitangent * v0);
+                var b = CreateRoundedCubeVertex(faceNormal + tangent * u1 + bitangent * v0);
+                var c = CreateRoundedCubeVertex(faceNormal + tangent * u1 + bitangent * v1);
+                var d = CreateRoundedCubeVertex(faceNormal + tangent * u0 + bitangent * v1);
+                vertices.AddRange([a, b, c, a, c, d]);
+            }
+        }
+        return vertices.ToArray();
+    }
+
+    private static CubeVertex CreateRoundedCubeVertex(Vector3 boxPosition)
+    {
+        const float bevelRadius = .10f;
+        const float innerExtent = 1f - bevelRadius;
+        var inner = new Vector3(innerExtent);
+        var nearestInnerPoint = Vector3.Clamp(boxPosition, -inner, inner);
+        var fromInnerBox = boxPosition - nearestInnerPoint;
+        var normal = Vector3.Normalize(fromInnerBox);
+        return new CubeVertex
+        {
+            Position = nearestInnerPoint + normal * bevelRadius,
+            Normal = normal
+        };
     }
 
     private static StarVertex[] CreateStarVertices()

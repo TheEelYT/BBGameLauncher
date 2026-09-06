@@ -14,7 +14,6 @@ public sealed class SpaceScene : FrameworkElement
     private TimeSpan _lastFrame;
     private double _elapsed;
     private double _motionElapsed;
-    private double _highlightStarted = -10;
     private int _selectedCube;
     private int _pendingCubeCount;
     private int _pendingSelectedCube;
@@ -34,12 +33,12 @@ public sealed class SpaceScene : FrameworkElement
     {
         menuItemCount = Math.Max(0, menuItemCount);
         var rebuilding = _cubes.Count != menuItemCount;
-        if (selectedIndex != _selectedCube || rebuilding)
-            _highlightStarted = _elapsed;
+        var selectionChanged = selectedIndex != _selectedCube;
         _selectedCube = Math.Clamp(selectedIndex, 0, Math.Max(0, menuItemCount - 1));
-        if (!rebuilding) return;
-
-        RebuildCubes(menuItemCount);
+        if (rebuilding)
+            RebuildCubes(menuItemCount);
+        if ((selectionChanged || rebuilding) && _cubes.Count > 0)
+            AddFlick(_cubes[_selectedCube]);
         InvalidateVisual();
     }
 
@@ -131,7 +130,6 @@ public sealed class SpaceScene : FrameworkElement
         }
         else if (_motion == CubeMotion.Exiting)
         {
-            center = Lerp(baseCenter, viewportCenter, eased);
             zoom = 1 - eased * .94;
         }
         else if (_motion == CubeMotion.Entering && _forwardTransition)
@@ -141,7 +139,6 @@ public sealed class SpaceScene : FrameworkElement
         }
         else if (_motion == CubeMotion.Entering)
         {
-            center = Lerp(viewportCenter, baseCenter, eased);
             zoom = 7 * (1 - eased) + eased;
         }
         var size = cube.Size * (1 + Math.Sin(_elapsed * .6 + cube.Phase) * .08) * (highlighted ? 1.12 : 1) * zoom;
@@ -154,12 +151,9 @@ public sealed class SpaceScene : FrameworkElement
             dc.DrawEllipse(glow, null, center, size * 1.9, size * 1.9);
         }
 
-        var flickAge = Math.Max(0, _elapsed - _highlightStarted);
-        // A decaying angular velocity: the cube makes one quick extra turn, then returns to its slow idle spin.
-        var flickRotation = highlighted ? (1 - Math.Exp(-flickAge * 3.1)) * 1.45 : 0;
-        var ax = _elapsed * (.075 + cube.Speed * .045) + cube.Phase + flickRotation * .72;
-        var ay = _elapsed * (.052 + cube.Speed * .035) + cube.Phase * 1.7 + flickRotation;
-        var az = _elapsed * (.014 + cube.Speed * .012) + cube.Phase + flickRotation * .18;
+        var ax = cube.AngleX;
+        var ay = cube.AngleY;
+        var az = cube.AngleZ;
         var vertices = new[]
         {
             new Point3(-1, -1, -1), new Point3(1, -1, -1), new Point3(1, 1, -1), new Point3(-1, 1, -1),
@@ -190,13 +184,6 @@ public sealed class SpaceScene : FrameworkElement
             var facePoints = face.Indices.Select(index => projected[index]).ToArray();
             dc.DrawGeometry(fill, null, Polygon(facePoints));
 
-            // Screen-space refraction: transmit each face through the IOR-dependent bend before it exits the prism.
-            var bend = (1 - 1 / GlassIor) * size * (1 - facing) * .92;
-            var refractedPoints = facePoints.Select(point => point + new Vector(normal.X * bend, normal.Y * bend)).ToArray();
-            var refractedAlpha = (byte)(opacity * transmission * (highlighted ? 44 : 24));
-            dc.DrawGeometry(new SolidColorBrush(Color.FromArgb(refractedAlpha, 173, 239, 255)), null, Polygon(refractedPoints));
-            if (fresnel > .08)
-                dc.DrawGeometry(null, new Pen(new SolidColorBrush(Color.FromArgb((byte)(opacity * fresnel * 210), 220, 251, 255)), 1), Polygon(refractedPoints));
         }
 
         var edgeAlpha = (byte)(opacity * (highlighted ? 235 : 145));
@@ -231,6 +218,27 @@ public sealed class SpaceScene : FrameworkElement
         from.X + (to.X - from.X) * amount,
         from.Y + (to.Y - from.Y) * amount);
 
+    private static void AddFlick(Cube cube)
+    {
+        cube.SpinX += 2.4;
+        cube.SpinY += 4.6;
+        cube.SpinZ += .85;
+    }
+
+    private static void UpdateCubeRotations(IEnumerable<Cube> cubes, double delta)
+    {
+        var damping = Math.Exp(-delta * 1.4);
+        foreach (var cube in cubes)
+        {
+            cube.AngleX += (.075 + cube.Speed * .045 + cube.SpinX) * delta;
+            cube.AngleY += (.052 + cube.Speed * .035 + cube.SpinY) * delta;
+            cube.AngleZ += (.014 + cube.Speed * .012 + cube.SpinZ) * delta;
+            cube.SpinX *= damping;
+            cube.SpinY *= damping;
+            cube.SpinZ *= damping;
+        }
+    }
+
     private static Point3 FaceNormal(Point3 a, Point3 b, Point3 c)
     {
         var u = new Point3(b.X - a.X, b.Y - a.Y, b.Z - a.Z);
@@ -263,6 +271,7 @@ public sealed class SpaceScene : FrameworkElement
             {
                 var delta = Math.Min(.05, (args.RenderingTime - _lastFrame).TotalSeconds);
                 _elapsed += delta;
+                UpdateCubeRotations(_cubes, delta);
                 if (_motion != CubeMotion.None)
                 {
                     _motionElapsed += delta;
@@ -271,8 +280,8 @@ public sealed class SpaceScene : FrameworkElement
                         if (_hasPendingCubeSet)
                         {
                             _selectedCube = _pendingSelectedCube;
-                            _highlightStarted = _elapsed;
                             RebuildCubes(_pendingCubeCount);
+                            if (_cubes.Count > 0) AddFlick(_cubes[_selectedCube]);
                             _hasPendingCubeSet = false;
                         }
                         _motion = CubeMotion.Entering;
@@ -290,7 +299,28 @@ public sealed class SpaceScene : FrameworkElement
     }
 
     private sealed record Star(double X, double Y, double Size, double Twinkle, double Phase);
-    private sealed record Cube(double X, double Y, double Size, double Phase, double Speed);
+    private sealed class Cube
+    {
+        public Cube(double x, double y, double size, double phase, double speed)
+        {
+            X = x; Y = y; Size = size; Phase = phase; Speed = speed;
+            AngleX = phase * .8;
+            AngleY = phase * 1.7;
+            AngleZ = phase * .25;
+        }
+
+        public double X { get; }
+        public double Y { get; }
+        public double Size { get; }
+        public double Phase { get; }
+        public double Speed { get; }
+        public double AngleX { get; set; }
+        public double AngleY { get; set; }
+        public double AngleZ { get; set; }
+        public double SpinX { get; set; }
+        public double SpinY { get; set; }
+        public double SpinZ { get; set; }
+    }
     private sealed record Face(int[] Indices, Color Tint);
     private readonly record struct Point3(double X, double Y, double Z);
     private enum CubeMotion { None, Exiting, Entering }

@@ -86,7 +86,8 @@ internal sealed class StartupVisual : FrameworkElement
         for (var i = 0; i < colours.Length; i++)
             DrawTrail(dc, center, i, colours[i]);
 
-        var orbitOpacity = Math.Clamp((_elapsed - 2.45) / .75, 0, 1);
+        var orbitOpacity = Math.Clamp((_elapsed - 2.45) / .75, 0, 1)
+            * (1 - Math.Clamp((_elapsed - 3.35) / .7, 0, 1));
         if (orbitOpacity > 0)
             DrawOrbit(dc, center, orbitOpacity);
 
@@ -111,7 +112,7 @@ internal sealed class StartupVisual : FrameworkElement
         for (var i = 0; i <= 32; i++)
             points.Add(TrailPoint(center, trail, start + (head - start) * i / 32));
 
-        var trailOpacity = Math.Min(1, head * 4) * (1 - Math.Max(0, _elapsed - 4.5) / 1.2);
+        var trailOpacity = Math.Min(1, head * 4) * (1 - Math.Clamp((_elapsed - 3.05) / .72, 0, 1));
         for (var segment = 1; segment < points.Count; segment++)
         {
             var progressAlongTail = (double)segment / (points.Count - 1);

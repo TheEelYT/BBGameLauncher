@@ -232,24 +232,20 @@ public sealed class SpaceScene : FrameworkElement
             // The shader below this overlay refracts the scene. These layered,
             // transparent face fills give that refraction a visible glass body
             // and internal reflections instead of leaving it as a wireframe.
-            var alpha = (byte)(opacity * (highlighted ? 78 + fresnel * 82 : 50 + fresnel * 58));
-            var tint = Blend(face.Tint, Color.FromRgb(170, 236, 255), transmission * .15);
+            var alpha = (byte)(opacity * (highlighted ? 56 + fresnel * 72 : 24 + fresnel * 54));
+            var clearWhite = Color.FromRgb(228, 243, 255);
+            var tint = highlighted
+                ? Blend(clearWhite, Color.FromRgb(118, 219, 255), .24 + transmission * .22)
+                : Blend(face.Tint, clearWhite, .91);
             var fill = GlassFaceBrush(tint, alpha, fresnel);
             var facePoints = face.Indices.Select(index => projected[index]).ToArray();
             dc.DrawGeometry(fill, null, Polygon(facePoints));
 
         }
 
-        var edgeAlpha = (byte)(opacity * (highlighted ? 235 : 145));
-        var edge = new Pen(new SolidColorBrush(Color.FromArgb(edgeAlpha, highlighted ? (byte)135 : (byte)95, highlighted ? (byte)231 : (byte)191, 255)), highlighted ? 1.65 : 1.05);
-        foreach (var (from, to) in Edges)
-            dc.DrawLine(edge, projected[from], projected[to]);
+        // No drawn edge pass: the face gradients and the backdrop-refraction
+        // effect define the cube volume without turning it into a wireframe.
     }
-
-    private static readonly (int From, int To)[] Edges =
-    {
-        (0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7), (7, 4), (0, 4), (1, 5), (2, 6), (3, 7)
-    };
 
     private (Point Center, double Size) GetCubeLayout(Cube cube, bool highlighted)
     {
@@ -358,10 +354,10 @@ public sealed class SpaceScene : FrameworkElement
     {
         static byte Scale(byte value, double amount) => (byte)Math.Clamp(value * amount, 0, 255);
 
-        var highlight = Color.FromArgb(Scale(alpha, .68 + fresnel * .26), 185, 239, 255);
-        var body = Color.FromArgb(Scale(alpha, .74), tint.R, tint.G, tint.B);
-        var clearCore = Color.FromArgb(Scale(alpha, .24), tint.R, tint.G, tint.B);
-        var returnReflection = Color.FromArgb(Scale(alpha, .54 + fresnel * .2), 120, 212, 255);
+        var highlight = Color.FromArgb(Scale(alpha, .48 + fresnel * .22), 255, 255, 255);
+        var body = Color.FromArgb(Scale(alpha, .62), tint.R, tint.G, tint.B);
+        var clearCore = Color.FromArgb(Scale(alpha, .16), tint.R, tint.G, tint.B);
+        var returnReflection = Color.FromArgb(Scale(alpha, .36 + fresnel * .18), tint.R, tint.G, tint.B);
         var brush = new LinearGradientBrush
         {
             StartPoint = new Point(0, 0),

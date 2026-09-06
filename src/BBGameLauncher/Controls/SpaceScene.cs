@@ -1,5 +1,7 @@
 using System.Windows;
 using System.Windows.Media;
+using System.Windows.Media.Imaging;
+using BBGameLauncher.Effects;
 
 namespace BBGameLauncher.Controls;
 
@@ -10,6 +12,8 @@ public sealed class SpaceScene : FrameworkElement
     private const double GlassF0 = ((1 - GlassIor) / (1 + GlassIor)) * ((1 - GlassIor) / (1 + GlassIor));
     private readonly List<Star> _stars = [];
     private readonly List<Cube> _cubes = [];
+    private readonly List<CubeLayer> _cubeLayers = [];
+    private readonly VisualCollection _cubeVisuals;
     private readonly Random _random = new(4821);
     private TimeSpan _lastFrame;
     private double _elapsed;
@@ -20,9 +24,12 @@ public sealed class SpaceScene : FrameworkElement
     private bool _hasPendingCubeSet;
     private CubeMotion _motion;
     private bool _forwardTransition;
+    private RenderTargetBitmap? _backdropSnapshot;
+    private double _lastBackdropSnapshotTime = -1;
 
     public SpaceScene()
     {
+        _cubeVisuals = new VisualCollection(this);
         Loaded += (_, _) => CompositionTarget.Rendering += RenderFrame;
         Unloaded += (_, _) => CompositionTarget.Rendering -= RenderFrame;
         ClipToBounds = true;
@@ -55,6 +62,8 @@ public sealed class SpaceScene : FrameworkElement
     private void RebuildCubes(int menuItemCount)
     {
         _cubes.Clear();
+        _cubeLayers.Clear();
+        _cubeVisuals.Clear();
         var placements = new[]
         {
             (.66, .19, 46d), (.85, .36, 36d), (.78, .61, 44d), (.61, .76, 32d),
@@ -63,8 +72,23 @@ public sealed class SpaceScene : FrameworkElement
         for (var i = 0; i < menuItemCount; i++)
         {
             var p = placements[i % placements.Length];
-            _cubes.Add(new Cube(p.Item1, p.Item2, p.Item3, i * .73, .24 + (i % 4) * .05));
+            var cube = new Cube(p.Item1, p.Item2, p.Item3, i * .73, .24 + (i % 4) * .05);
+            _cubes.Add(cube);
+            var layer = new CubeLayer(this, cube);
+            _cubeLayers.Add(layer);
+            _cubeVisuals.Add(layer.Refraction);
+            _cubeVisuals.Add(layer.Overlay);
         }
+    }
+
+    protected override int VisualChildrenCount => _cubeVisuals.Count;
+    protected override Visual GetVisualChild(int index) => _cubeVisuals[index];
+
+    protected override Size ArrangeOverride(Size finalSize)
+    {
+        foreach (CubeLayer layer in _cubeLayers)
+            layer.Arrange(new Rect(finalSize));
+        return finalSize;
     }
 
     protected override void OnRender(DrawingContext dc)
@@ -83,11 +107,43 @@ public sealed class SpaceScene : FrameworkElement
                 new Point(star.X * RenderSize.Width, star.Y * RenderSize.Height), star.Size, star.Size);
         }
 
-        for (var i = 0; i < _cubes.Count; i++)
-            DrawCube(dc, _cubes[i], i == _selectedCube);
+        UpdateBackdropSnapshot();
+        for (var i = 0; i < _cubeLayers.Count; i++)
+            _cubeLayers[i].Update(i == _selectedCube);
 
         dc.DrawRectangle(null, new Pen(new SolidColorBrush(Color.FromArgb(42, 101, 168, 240)), 1),
             new Rect(.5, .5, Math.Max(0, RenderSize.Width - 1), Math.Max(0, RenderSize.Height - 1)));
+    }
+
+    private void UpdateBackdropSnapshot()
+    {
+        if (RenderSize.Width <= 0 || RenderSize.Height <= 0)
+            return;
+
+        var dpi = VisualTreeHelper.GetDpi(this);
+        var width = Math.Max(1, (int)Math.Ceiling(RenderSize.Width * dpi.DpiScaleX));
+        var height = Math.Max(1, (int)Math.Ceiling(RenderSize.Height * dpi.DpiScaleY));
+        var currentSize = _backdropSnapshot?.PixelWidth == width && _backdropSnapshot.PixelHeight == height;
+        if (currentSize && _elapsed - _lastBackdropSnapshotTime < 1d / 15d)
+            return;
+
+        _backdropSnapshot = new RenderTargetBitmap(width, height, dpi.PixelsPerInchX, dpi.PixelsPerInchY, PixelFormats.Pbgra32);
+        var visual = new DrawingVisual();
+        using (var snapshotContext = visual.RenderOpen())
+        {
+            snapshotContext.DrawRectangle(new LinearGradientBrush(Color.FromRgb(1, 4, 12), Color.FromRgb(2, 8, 19), 90), null, new Rect(RenderSize));
+            DrawNebula(snapshotContext, new Point(RenderSize.Width * .2, RenderSize.Height * .46), RenderSize.Width * .48, Color.FromArgb(113, 67, 69, 195));
+            DrawNebula(snapshotContext, new Point(RenderSize.Width * .79, RenderSize.Height * .23), RenderSize.Width * .36, Color.FromArgb(48, 22, 71, 133));
+            DrawNebula(snapshotContext, new Point(RenderSize.Width * .68, RenderSize.Height * .72), RenderSize.Width * .31, Color.FromArgb(32, 3, 72, 132));
+            foreach (var star in _stars)
+            {
+                var shimmer = .35 + (Math.Sin(_elapsed * star.Twinkle + star.Phase) + 1) * .17;
+                snapshotContext.DrawEllipse(new SolidColorBrush(Color.FromArgb((byte)(255 * shimmer), 140, 204, 255)), null,
+                    new Point(star.X * RenderSize.Width, star.Y * RenderSize.Height), star.Size, star.Size);
+            }
+        }
+        _backdropSnapshot.Render(visual);
+        _lastBackdropSnapshotTime = _elapsed;
     }
 
     private void DrawNebula(DrawingContext dc, Point center, double radius, Color color)
@@ -173,9 +229,11 @@ public sealed class SpaceScene : FrameworkElement
             var facing = Math.Clamp(Math.Abs(normal.Z), 0, 1);
             var fresnel = GlassF0 + (1 - GlassF0) * Math.Pow(1 - facing, 5);
             var transmission = 1 - fresnel;
-            var alpha = (byte)(opacity * (highlighted ? 42 + fresnel * 125 : 20 + fresnel * 68));
-            // Thin glass transmits a cool background tint; the Fresnel term brings bright edge reflections.
-            var tint = Blend(face.Tint, Color.FromRgb(170, 236, 255), transmission * .22);
+            // The shader below this overlay is the actual scene refraction.
+            // Keep this surface tint deliberately light so it still reads as
+            // glass rather than returning to the old opaque blue plastic look.
+            var alpha = (byte)(opacity * (highlighted ? 18 + fresnel * 42 : 10 + fresnel * 25));
+            var tint = Blend(face.Tint, Color.FromRgb(170, 236, 255), transmission * .15);
             var fill = new SolidColorBrush(Color.FromArgb(alpha, face.Tint.R, face.Tint.G, face.Tint.B));
             fill.Color = Color.FromArgb(alpha, tint.R, tint.G, tint.B);
             var facePoints = face.Indices.Select(index => projected[index]).ToArray();
@@ -193,6 +251,57 @@ public sealed class SpaceScene : FrameworkElement
     {
         (0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7), (7, 4), (0, 4), (1, 5), (2, 6), (3, 7)
     };
+
+    private (Point Center, double Size) GetCubeLayout(Cube cube, bool highlighted)
+    {
+        var transition = Math.Clamp(_motionElapsed / .42, 0, 1);
+        var eased = 1 - Math.Pow(1 - transition, 3);
+        var bob = Math.Sin(_elapsed * cube.Speed + cube.Phase) * 18;
+        var center = new Point(cube.X * RenderSize.Width + Math.Cos(_elapsed * cube.Speed + cube.Phase) * 18,
+            cube.Y * RenderSize.Height + bob);
+        var zoom = _motion switch
+        {
+            CubeMotion.Exiting when _forwardTransition => 1 + eased * 7,
+            CubeMotion.Exiting => 1 - eased * .94,
+            CubeMotion.Entering when _forwardTransition => .045 + eased * .955,
+            CubeMotion.Entering => 7 * (1 - eased) + eased,
+            _ => 1
+        };
+        var size = cube.Size * (1 + Math.Sin(_elapsed * .6 + cube.Phase) * .08) * (highlighted ? 1.12 : 1) * zoom;
+        return (center, size);
+    }
+
+    private Geometry GetCubeSilhouette(Cube cube, bool highlighted)
+    {
+        var (center, size) = GetCubeLayout(cube, highlighted);
+        var points = new[]
+        {
+            new Point3(-1, -1, -1), new Point3(1, -1, -1), new Point3(1, 1, -1), new Point3(-1, 1, -1),
+            new Point3(-1, -1, 1), new Point3(1, -1, 1), new Point3(1, 1, 1), new Point3(-1, 1, 1)
+        }.Select(v => Project(Rotate(v, cube.AngleX, cube.AngleY, cube.AngleZ), center, size)).ToList();
+
+        // The cube's projected outer hull is exactly the region that should
+        // refract the starfield. Internal face borders are painted above it.
+        var hull = points.OrderBy(p => p.X).ThenBy(p => p.Y).Aggregate(new List<Point>(), (half, point) =>
+        {
+            while (half.Count >= 2 && Cross(half[^2], half[^1], point) <= 0) half.RemoveAt(half.Count - 1);
+            half.Add(point);
+            return half;
+        });
+        var upper = points.OrderByDescending(p => p.X).ThenByDescending(p => p.Y).Aggregate(new List<Point>(), (half, point) =>
+        {
+            while (half.Count >= 2 && Cross(half[^2], half[^1], point) <= 0) half.RemoveAt(half.Count - 1);
+            half.Add(point);
+            return half;
+        });
+        hull.RemoveAt(hull.Count - 1);
+        upper.RemoveAt(upper.Count - 1);
+        hull.AddRange(upper);
+        return Polygon(hull.ToArray());
+    }
+
+    private static double Cross(Point origin, Point a, Point b) =>
+        (a.X - origin.X) * (b.Y - origin.Y) - (a.Y - origin.Y) * (b.X - origin.X);
 
     private static Point3 Rotate(Point3 p, double xAngle, double yAngle, double zAngle)
     {
@@ -292,6 +401,82 @@ public sealed class SpaceScene : FrameworkElement
     }
 
     private sealed record Star(double X, double Y, double Size, double Twinkle, double Phase);
+
+    private sealed class CubeLayer
+    {
+        public CubeLayer(SpaceScene scene, Cube cube)
+        {
+            Refraction = new CubeRefractionVisual(scene, cube);
+            Overlay = new CubeOverlayVisual(scene, cube);
+        }
+
+        public CubeRefractionVisual Refraction { get; }
+        public CubeOverlayVisual Overlay { get; }
+
+        public void Arrange(Rect bounds)
+        {
+            Refraction.Arrange(bounds);
+            Overlay.Arrange(bounds);
+        }
+
+        public void Update(bool highlighted)
+        {
+            Refraction.Update(highlighted);
+            Overlay.Highlighted = highlighted;
+            Overlay.InvalidateVisual();
+        }
+    }
+
+    private sealed class CubeRefractionVisual : FrameworkElement
+    {
+        private readonly SpaceScene _scene;
+        private readonly Cube _cube;
+        private readonly CubeLiquidGlassEffect _glass = new();
+
+        public CubeRefractionVisual(SpaceScene scene, Cube cube)
+        {
+            _scene = scene;
+            _cube = cube;
+            IsHitTestVisible = false;
+            Effect = _glass;
+        }
+
+        public void Update(bool highlighted)
+        {
+            var (center, size) = _scene.GetCubeLayout(_cube, highlighted);
+            Clip = _scene.GetCubeSilhouette(_cube, highlighted);
+            _glass.TextureSize = new Point(Math.Max(1, ActualWidth), Math.Max(1, ActualHeight));
+            _glass.GlassCenter = center;
+            _glass.GlassSize = new Point(Math.Max(1, size * 2.3), Math.Max(1, size * 2.3));
+            _glass.BlurIntensity = highlighted ? .90f : .68f;
+            InvalidateVisual();
+        }
+
+        protected override void OnRender(DrawingContext drawingContext)
+        {
+            if (_scene._backdropSnapshot != null)
+                drawingContext.DrawImage(_scene._backdropSnapshot, new Rect(RenderSize));
+        }
+    }
+
+    private sealed class CubeOverlayVisual : FrameworkElement
+    {
+        private readonly SpaceScene _scene;
+        private readonly Cube _cube;
+
+        public CubeOverlayVisual(SpaceScene scene, Cube cube)
+        {
+            _scene = scene;
+            _cube = cube;
+            IsHitTestVisible = false;
+        }
+
+        public bool Highlighted { get; set; }
+
+        protected override void OnRender(DrawingContext drawingContext) =>
+            _scene.DrawCube(drawingContext, _cube, Highlighted);
+    }
+
     private sealed class Cube
     {
         public Cube(double x, double y, double size, double phase, double speed)

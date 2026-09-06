@@ -26,6 +26,7 @@ public partial class MainWindow : Window
     ];
 
     private List<LauncherMenuItem> _activeItems = [];
+    private readonly List<Button> _menuButtons = [];
     private int _selectedIndex;
     private bool _inSettings;
     private bool _isFullscreen;
@@ -61,6 +62,7 @@ public partial class MainWindow : Window
     private void RenderMenu()
     {
         MenuPanel.Children.Clear();
+        _menuButtons.Clear();
         for (var i = 0; i < _activeItems.Count; i++)
         {
             var index = i;
@@ -77,24 +79,48 @@ public partial class MainWindow : Window
                 FontFamily = new FontFamily("Segoe UI"),
                 FontSize = 20,
                 FontWeight = FontWeights.Bold,
-                Foreground = i == _selectedIndex ? new SolidColorBrush(Color.FromRgb(230, 228, 69)) : new SolidColorBrush(Color.FromRgb(76, 194, 247)),
-                Effect = new System.Windows.Media.Effects.DropShadowEffect
-                {
-                    Color = i == _selectedIndex ? Color.FromRgb(236, 232, 83) : Color.FromRgb(62, 178, 247),
-                    BlurRadius = 12,
-                    ShadowDepth = 0,
-                    Opacity = 0.55
-                }
+                Focusable = false
             };
-            button.Click += (_, _) => { _selectedIndex = index; ActivateSelected(); };
-            button.MouseEnter += (_, _) => { _selectedIndex = index; RenderMenu(); };
+            button.Click += (_, _) => { SetSelectedIndex(index); ActivateSelected(); };
+            button.MouseEnter += (_, _) => SetSelectedIndex(index);
             MenuPanel.Children.Add(button);
+            _menuButtons.Add(button);
         }
 
-        var selected = _activeItems[_selectedIndex];
+        UpdateMenuSelection();
         if (DetailPanel.Child is null)
             HintText.Text = _inSettings ? "SYSTEM SETTINGS" : "MAIN MENU";
-        ToolTip = selected.Description;
+    }
+
+    private void SetSelectedIndex(int index)
+    {
+        if (index < 0 || index >= _activeItems.Count || index == _selectedIndex)
+            return;
+
+        _selectedIndex = index;
+        UpdateMenuSelection();
+    }
+
+    private void UpdateMenuSelection()
+    {
+        for (var i = 0; i < _menuButtons.Count; i++)
+        {
+            var selected = i == _selectedIndex;
+            _menuButtons[i].Foreground = selected
+                ? new SolidColorBrush(Color.FromRgb(230, 228, 69))
+                : new SolidColorBrush(Color.FromRgb(76, 194, 247));
+            _menuButtons[i].Effect = new System.Windows.Media.Effects.DropShadowEffect
+            {
+                Color = selected ? Color.FromRgb(236, 232, 83) : Color.FromRgb(62, 178, 247),
+                BlurRadius = 12,
+                ShadowDepth = 0,
+                Opacity = 0.55
+            };
+        }
+
+        Scene.SetMenuCubes(_activeItems.Count, _selectedIndex);
+        if (_activeItems.Count > 0)
+            ToolTip = _activeItems[_selectedIndex].Description;
     }
 
     private void ActivateSelected()
@@ -166,12 +192,10 @@ public partial class MainWindow : Window
         switch (e.Key)
         {
             case Key.Up:
-                _selectedIndex = (_selectedIndex - 1 + _activeItems.Count) % _activeItems.Count;
-                RenderMenu();
+                SetSelectedIndex((_selectedIndex - 1 + _activeItems.Count) % _activeItems.Count);
                 break;
             case Key.Down:
-                _selectedIndex = (_selectedIndex + 1) % _activeItems.Count;
-                RenderMenu();
+                SetSelectedIndex((_selectedIndex + 1) % _activeItems.Count);
                 break;
             case Key.Enter:
                 ActivateSelected();

@@ -223,32 +223,41 @@ public sealed class SpaceScene : FrameworkElement
             new Face(new[] { 3, 7, 4, 0 }, Color.FromRgb(20, 66, 131))
         };
 
-        foreach (var face in faces.OrderBy(face => face.Indices.Average(index => vertices[index].Z)))
+        var orderedFaces = faces.OrderBy(face => face.Indices.Average(index => vertices[index].Z)).ToArray();
+
+        void DrawGlassFace(Face face, bool refractBackdrop)
         {
             var normal = FaceNormal(vertices[face.Indices[0]], vertices[face.Indices[1]], vertices[face.Indices[2]]);
             var facing = Math.Clamp(Math.Abs(normal.Z), 0, 1);
             var fresnel = GlassF0 + (1 - GlassF0) * Math.Pow(1 - facing, 5);
             var transmission = 1 - fresnel;
-            // The shader below this overlay refracts the scene. These layered,
-            // transparent face fills give that refraction a visible glass body
-            // and internal reflections instead of leaving it as a wireframe.
             var alpha = (byte)(opacity * (highlighted ? 72 + fresnel * 82 : 43 + fresnel * 68));
             var clearWhite = Color.FromRgb(228, 243, 255);
             var tint = highlighted
                 ? Blend(clearWhite, Color.FromRgb(118, 219, 255), .24 + transmission * .22)
                 : Blend(face.Tint, clearWhite, .91);
             var facePoints = face.Indices.Select(index => projected[index]).ToArray();
-            var refractedBackdrop = RefractedBackdropBrush(normal, highlighted, opacity, fresnel);
-            if (refractedBackdrop != null)
-                dc.DrawGeometry(refractedBackdrop, null, Polygon(facePoints));
+            if (refractBackdrop)
+            {
+                var refractedBackdrop = RefractedBackdropBrush(normal, highlighted, opacity, fresnel);
+                if (refractedBackdrop != null)
+                    dc.DrawGeometry(refractedBackdrop, null, Polygon(facePoints));
+            }
 
             var fill = GlassFaceBrush(tint, alpha, fresnel);
             dc.DrawGeometry(fill, null, Polygon(facePoints));
-
         }
 
-        // No drawn edge pass: the face gradients and the backdrop-refraction
-        // effect define the cube volume without turning it into a wireframe.
+        // The far walls are the lens: refract the scene only through those
+        // surfaces, then place the emitted light inside the cube before the
+        // near walls are drawn over it.
+        foreach (var face in orderedFaces.Where(face => FaceNormal(vertices[face.Indices[0]], vertices[face.Indices[1]], vertices[face.Indices[2]]).Z < 0))
+            DrawGlassFace(face, refractBackdrop: true);
+
+        DrawInternalGlow(dc, center, size, opacity, highlighted);
+
+        foreach (var face in orderedFaces.Where(face => FaceNormal(vertices[face.Indices[0]], vertices[face.Indices[1]], vertices[face.Indices[2]]).Z >= 0))
+            DrawGlassFace(face, refractBackdrop: false);
     }
 
     private (Point Center, double Size) GetCubeLayout(Cube cube, bool highlighted)
@@ -372,6 +381,16 @@ public sealed class SpaceScene : FrameworkElement
             Stretch = Stretch.Fill,
             Opacity = opacity * (highlighted ? .72 : .58)
         };
+    }
+
+    private static void DrawInternalGlow(DrawingContext dc, Point center, double size, double opacity, bool highlighted)
+    {
+        var core = new RadialGradientBrush();
+        var glowAlpha = highlighted ? 158 : 66;
+        core.GradientStops.Add(new GradientStop(Color.FromArgb((byte)(opacity * glowAlpha), 52, 188, 255), 0));
+        core.GradientStops.Add(new GradientStop(Color.FromArgb((byte)(opacity * glowAlpha * .38), 95, 206, 255), .36));
+        core.GradientStops.Add(new GradientStop(Color.FromArgb(0, 95, 206, 255), 1));
+        dc.DrawEllipse(core, null, center, size * (highlighted ? .56 : .42), size * (highlighted ? .56 : .42));
     }
 
     private static LinearGradientBrush GlassFaceBrush(Color tint, byte alpha, double fresnel)

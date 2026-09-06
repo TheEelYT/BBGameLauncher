@@ -52,12 +52,12 @@ float RayBoxExit(float3 origin, float3 direction)
     return max(0.001, min(distances.x, min(distances.y, distances.z)));
 }
 
-float3 BoxNormal(float3 point)
+float3 BoxNormal(float3 cubePosition)
 {
-    float3 a = abs(point);
-    if (a.x > a.y && a.x > a.z) return float3(sign(point.x), 0, 0);
-    if (a.y > a.z) return float3(0, sign(point.y), 0);
-    return float3(0, 0, sign(point.z));
+    float3 a = abs(cubePosition);
+    if (a.x > a.y && a.x > a.z) return float3(sign(cubePosition.x), 0, 0);
+    if (a.y > a.z) return float3(0, sign(cubePosition.y), 0);
+    return float3(0, 0, sign(cubePosition.z));
 }
 
 float4 PSMain(PSInput input) : SV_TARGET

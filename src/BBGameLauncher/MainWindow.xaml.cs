@@ -30,6 +30,7 @@ public partial class MainWindow : Window
     private int _selectedIndex;
     private bool _inSettings;
     private bool _isFullscreen;
+    private bool _isMenuTransition;
 
     public MainWindow()
     {
@@ -125,10 +126,11 @@ public partial class MainWindow : Window
 
     private void ActivateSelected()
     {
+        if (_isMenuTransition) return;
         var item = _activeItems[_selectedIndex];
         if (!_inSettings && item.Title == "System Settings")
         {
-            ShowSettingsMenu();
+            TransitionToMenu(forward: true, ShowSettingsMenu);
             return;
         }
 
@@ -187,6 +189,27 @@ public partial class MainWindow : Window
         DetailPanel.BeginAnimation(OpacityProperty, fade);
     }
 
+    private void TransitionToMenu(bool forward, Action showNextMenu)
+    {
+        if (_isMenuTransition) return;
+        _isMenuTransition = true;
+        Scene.BeginCubeExit(forward);
+
+        var fadeOut = new DoubleAnimation(1, 0, TimeSpan.FromMilliseconds(420));
+        fadeOut.Completed += (_, _) =>
+        {
+            ContentArea.BeginAnimation(OpacityProperty, null);
+            ContentArea.Opacity = 0;
+            showNextMenu();
+            Scene.BeginCubeEnter(forward);
+
+            var fadeIn = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(440));
+            fadeIn.Completed += (_, _) => _isMenuTransition = false;
+            ContentArea.BeginAnimation(OpacityProperty, fadeIn);
+        };
+        ContentArea.BeginAnimation(OpacityProperty, fadeOut);
+    }
+
     private void Window_KeyDown(object sender, KeyEventArgs e)
     {
         switch (e.Key)
@@ -201,7 +224,7 @@ public partial class MainWindow : Window
                 ActivateSelected();
                 break;
             case Key.Escape:
-                if (_inSettings) ShowRootMenu(); else if (_isFullscreen) ToggleFullscreen();
+                if (_inSettings) TransitionToMenu(forward: false, ShowRootMenu); else if (_isFullscreen) ToggleFullscreen();
                 break;
             case Key.F11:
                 ToggleFullscreen();

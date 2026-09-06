@@ -3,7 +3,7 @@ using System.Windows.Media;
 
 namespace BBGameLauncher.Controls;
 
-/// <summary>Procedural starfield and one glass cube for every currently visible menu item.</summary>
+/// <summary>Procedural starfield with perspective-projected, glass-like menu cubes.</summary>
 public sealed class SpaceScene : FrameworkElement
 {
     private readonly List<Star> _stars = [];
@@ -11,7 +11,10 @@ public sealed class SpaceScene : FrameworkElement
     private readonly Random _random = new(4821);
     private TimeSpan _lastFrame;
     private double _elapsed;
+    private double _motionElapsed;
     private int _selectedCube;
+    private CubeMotion _motion;
+    private bool _forwardTransition;
 
     public SpaceScene()
     {
@@ -21,7 +24,6 @@ public sealed class SpaceScene : FrameworkElement
         SetMenuCubes(4, 0);
     }
 
-    /// <summary>Synchronizes the background cubes with the menu currently on screen.</summary>
     public void SetMenuCubes(int menuItemCount, int selectedIndex)
     {
         menuItemCount = Math.Max(0, menuItemCount);
@@ -43,11 +45,24 @@ public sealed class SpaceScene : FrameworkElement
         InvalidateVisual();
     }
 
+    public void BeginCubeExit(bool forward)
+    {
+        _motion = CubeMotion.Exiting;
+        _motionElapsed = 0;
+        _forwardTransition = forward;
+    }
+
+    public void BeginCubeEnter(bool forward)
+    {
+        _motion = CubeMotion.Entering;
+        _motionElapsed = 0;
+        _forwardTransition = forward;
+    }
+
     protected override void OnRender(DrawingContext dc)
     {
         base.OnRender(dc);
-        var bounds = new Rect(RenderSize);
-        dc.DrawRectangle(new LinearGradientBrush(Color.FromRgb(1, 4, 12), Color.FromRgb(2, 8, 19), 90), null, bounds);
+        dc.DrawRectangle(new LinearGradientBrush(Color.FromRgb(1, 4, 12), Color.FromRgb(2, 8, 19), 90), null, new Rect(RenderSize));
         DrawNebula(dc, new Point(RenderSize.Width * .2, RenderSize.Height * .46), RenderSize.Width * .48, Color.FromArgb(113, 67, 69, 195));
         DrawNebula(dc, new Point(RenderSize.Width * .79, RenderSize.Height * .23), RenderSize.Width * .36, Color.FromArgb(48, 22, 71, 133));
         DrawNebula(dc, new Point(RenderSize.Width * .68, RenderSize.Height * .72), RenderSize.Width * .31, Color.FromArgb(32, 3, 72, 132));
@@ -86,43 +101,87 @@ public sealed class SpaceScene : FrameworkElement
 
     private void DrawCube(DrawingContext dc, Cube cube, bool highlighted)
     {
+        var transition = Math.Clamp(_motionElapsed / .42, 0, 1);
+        var eased = 1 - Math.Pow(1 - transition, 3);
+        var travel = _motion switch
+        {
+            CubeMotion.Exiting => eased,
+            CubeMotion.Entering => 1 - eased,
+            _ => 0
+        };
+        var opacity = _motion switch
+        {
+            CubeMotion.Exiting => 1 - eased,
+            CubeMotion.Entering => eased,
+            _ => 1
+        };
+        var direction = _forwardTransition ? 1 : -1;
         var bob = Math.Sin(_elapsed * cube.Speed + cube.Phase) * 18;
-        var angle = _elapsed * (.28 + cube.Speed * .12) + cube.Phase;
-        var center = new Point(cube.X * RenderSize.Width + Math.Cos(_elapsed * cube.Speed + cube.Phase) * 18,
-            cube.Y * RenderSize.Height + bob);
-        var size = cube.Size * (1 + Math.Sin(_elapsed * .6 + cube.Phase) * .08) * (highlighted ? 1.13 : 1);
-        var a = MakePoint(center, size, angle, -1, -1);
-        var b = MakePoint(center, size, angle, 1, -1);
-        var c = MakePoint(center, size, angle, 1, 1);
-        var d = MakePoint(center, size, angle, -1, 1);
-        var depth = new Vector(Math.Cos(angle + .8) * size * .46, Math.Sin(angle + .8) * size * .46);
-        var a2 = a + depth; var b2 = b + depth; var c2 = c + depth;
+        var center = new Point(
+            cube.X * RenderSize.Width + Math.Cos(_elapsed * cube.Speed + cube.Phase) * 18 + direction * travel * RenderSize.Width * .23,
+            cube.Y * RenderSize.Height + bob - travel * RenderSize.Height * .075);
+        var size = cube.Size * (1 + Math.Sin(_elapsed * .6 + cube.Phase) * .08) * (highlighted ? 1.12 : 1) * (1 + travel * .55);
 
-        if (highlighted)
+        if (highlighted && opacity > 0)
         {
             var glow = new RadialGradientBrush();
-            glow.GradientStops.Add(new GradientStop(Color.FromArgb(115, 46, 178, 255), 0));
+            glow.GradientStops.Add(new GradientStop(Color.FromArgb((byte)(opacity * 110), 46, 178, 255), 0));
             glow.GradientStops.Add(new GradientStop(Color.FromArgb(0, 46, 178, 255), 1));
-            dc.DrawEllipse(glow, null, center, size * 1.75, size * 1.75);
+            dc.DrawEllipse(glow, null, center, size * 1.9, size * 1.9);
         }
 
-        var front = Polygon(a, b, c, d);
-        var top = Polygon(a, b, b2, a2);
-        var side = Polygon(b, c, c2, b2);
-        var outline = new Pen(new SolidColorBrush(highlighted ? Color.FromArgb(235, 125, 226, 255) : Color.FromArgb(125, 102, 208, 255)), highlighted ? 1.65 : 1.05);
-        dc.DrawGeometry(new SolidColorBrush(highlighted ? Color.FromArgb(100, 50, 165, 255) : Color.FromArgb(32, 76, 173, 255)), outline, front);
-        dc.DrawGeometry(new SolidColorBrush(highlighted ? Color.FromArgb(145, 123, 223, 255) : Color.FromArgb(58, 133, 223, 255)), outline, top);
-        dc.DrawGeometry(new SolidColorBrush(highlighted ? Color.FromArgb(82, 24, 117, 235) : Color.FromArgb(27, 31, 116, 214)), outline, side);
-        dc.DrawLine(outline, c, d);
-        dc.DrawLine(outline, d, a);
-        if (highlighted)
-            dc.DrawLine(new Pen(new SolidColorBrush(Color.FromArgb(200, 220, 250, 255)), 1.25), a, b);
+        var ax = _elapsed * (.7 + cube.Speed * .35) + cube.Phase;
+        var ay = _elapsed * (.5 + cube.Speed * .25) + cube.Phase * 1.7;
+        var az = _elapsed * (.18 + cube.Speed * .1) + cube.Phase;
+        var vertices = new[]
+        {
+            new Point3(-1, -1, -1), new Point3(1, -1, -1), new Point3(1, 1, -1), new Point3(-1, 1, -1),
+            new Point3(-1, -1, 1), new Point3(1, -1, 1), new Point3(1, 1, 1), new Point3(-1, 1, 1)
+        }.Select(v => Rotate(v, ax, ay, az)).ToArray();
+        var projected = vertices.Select(v => Project(v, center, size)).ToArray();
+        var faces = new[]
+        {
+            new Face(new[] { 0, 1, 2, 3 }, Color.FromRgb(28, 90, 160)),
+            new Face(new[] { 4, 7, 6, 5 }, Color.FromRgb(75, 194, 255)),
+            new Face(new[] { 0, 4, 5, 1 }, Color.FromRgb(110, 211, 255)),
+            new Face(new[] { 1, 5, 6, 2 }, Color.FromRgb(38, 113, 209)),
+            new Face(new[] { 2, 6, 7, 3 }, Color.FromRgb(51, 145, 234)),
+            new Face(new[] { 3, 7, 4, 0 }, Color.FromRgb(20, 66, 131))
+        };
+
+        foreach (var face in faces.OrderBy(face => face.Indices.Average(index => vertices[index].Z)))
+        {
+            var alpha = (byte)(opacity * (highlighted ? 112 : 46));
+            var fill = new SolidColorBrush(Color.FromArgb(alpha, face.Tint.R, face.Tint.G, face.Tint.B));
+            dc.DrawGeometry(fill, null, Polygon(face.Indices.Select(index => projected[index]).ToArray()));
+        }
+
+        var edgeAlpha = (byte)(opacity * (highlighted ? 235 : 132));
+        var edge = new Pen(new SolidColorBrush(Color.FromArgb(edgeAlpha, highlighted ? (byte)135 : (byte)95, highlighted ? (byte)231 : (byte)191, 255)), highlighted ? 1.65 : 1.05);
+        foreach (var (from, to) in Edges)
+            dc.DrawLine(edge, projected[from], projected[to]);
     }
 
-    private static Point MakePoint(Point c, double size, double angle, int x, int y)
+    private static readonly (int From, int To)[] Edges =
     {
-        var px = x * size * .5; var py = y * size * .5;
-        return new Point(c.X + px * Math.Cos(angle) - py * Math.Sin(angle), c.Y + px * Math.Sin(angle) + py * Math.Cos(angle));
+        (0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7), (7, 4), (0, 4), (1, 5), (2, 6), (3, 7)
+    };
+
+    private static Point3 Rotate(Point3 p, double xAngle, double yAngle, double zAngle)
+    {
+        var x = p.X * Math.Cos(yAngle) + p.Z * Math.Sin(yAngle);
+        var z = -p.X * Math.Sin(yAngle) + p.Z * Math.Cos(yAngle);
+        var y = p.Y * Math.Cos(xAngle) - z * Math.Sin(xAngle);
+        z = p.Y * Math.Sin(xAngle) + z * Math.Cos(xAngle);
+        var finalX = x * Math.Cos(zAngle) - y * Math.Sin(zAngle);
+        var finalY = x * Math.Sin(zAngle) + y * Math.Cos(zAngle);
+        return new Point3(finalX, finalY, z);
+    }
+
+    private static Point Project(Point3 p, Point center, double size)
+    {
+        var perspective = size * 2.1 / (4.3 - p.Z);
+        return new Point(center.X + p.X * perspective, center.Y + p.Y * perspective);
     }
 
     private static StreamGeometry Polygon(params Point[] points)
@@ -140,7 +199,15 @@ public sealed class SpaceScene : FrameworkElement
         if (e is RenderingEventArgs args)
         {
             if (_lastFrame != default)
-                _elapsed += Math.Min(.05, (args.RenderingTime - _lastFrame).TotalSeconds);
+            {
+                var delta = Math.Min(.05, (args.RenderingTime - _lastFrame).TotalSeconds);
+                _elapsed += delta;
+                if (_motion != CubeMotion.None)
+                {
+                    _motionElapsed += delta;
+                    if (_motionElapsed >= .42) _motion = CubeMotion.None;
+                }
+            }
             _lastFrame = args.RenderingTime;
         }
         InvalidateVisual();
@@ -148,4 +215,7 @@ public sealed class SpaceScene : FrameworkElement
 
     private sealed record Star(double X, double Y, double Size, double Twinkle, double Phase);
     private sealed record Cube(double X, double Y, double Size, double Phase, double Speed);
+    private sealed record Face(int[] Indices, Color Tint);
+    private readonly record struct Point3(double X, double Y, double Z);
+    private enum CubeMotion { None, Exiting, Entering }
 }

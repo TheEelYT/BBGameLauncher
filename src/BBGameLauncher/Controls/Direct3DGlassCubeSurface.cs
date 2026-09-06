@@ -1,3 +1,4 @@
+using System.IO;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using Vortice.D3DCompiler;
@@ -91,7 +92,7 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
         e.Context.RSSetState(_rasterizer);
         e.Context.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
         e.Context.IASetInputLayout(_inputLayout);
-        e.Context.IASetVertexBuffer(0, _vertices, Marshal.SizeOf<CubeVertex>());
+        e.Context.IASetVertexBuffer(0, _vertices, (uint)Marshal.SizeOf<CubeVertex>());
         e.Context.VSSetShader(_vertexShader);
         e.Context.PSSetShader(_pixelShader);
         e.Context.VSSetConstantBuffer(0, _frameConstants);

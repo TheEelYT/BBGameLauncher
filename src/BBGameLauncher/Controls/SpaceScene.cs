@@ -232,13 +232,17 @@ public sealed class SpaceScene : FrameworkElement
             // The shader below this overlay refracts the scene. These layered,
             // transparent face fills give that refraction a visible glass body
             // and internal reflections instead of leaving it as a wireframe.
-            var alpha = (byte)(opacity * (highlighted ? 56 + fresnel * 72 : 24 + fresnel * 54));
+            var alpha = (byte)(opacity * (highlighted ? 72 + fresnel * 82 : 43 + fresnel * 68));
             var clearWhite = Color.FromRgb(228, 243, 255);
             var tint = highlighted
                 ? Blend(clearWhite, Color.FromRgb(118, 219, 255), .24 + transmission * .22)
                 : Blend(face.Tint, clearWhite, .91);
-            var fill = GlassFaceBrush(tint, alpha, fresnel);
             var facePoints = face.Indices.Select(index => projected[index]).ToArray();
+            var refractedBackdrop = RefractedBackdropBrush(normal, highlighted, opacity, fresnel);
+            if (refractedBackdrop != null)
+                dc.DrawGeometry(refractedBackdrop, null, Polygon(facePoints));
+
+            var fill = GlassFaceBrush(tint, alpha, fresnel);
             dc.DrawGeometry(fill, null, Polygon(facePoints));
 
         }
@@ -350,14 +354,34 @@ public sealed class SpaceScene : FrameworkElement
         (byte)(from.G + (to.G - from.G) * amount),
         (byte)(from.B + (to.B - from.B) * amount));
 
+    private ImageBrush? RefractedBackdropBrush(Point3 normal, bool highlighted, double opacity, double fresnel)
+    {
+        if (_backdropSnapshot == null || RenderSize.Width <= 0 || RenderSize.Height <= 0)
+            return null;
+
+        // Each face looks through the starfield from a slightly different
+        // direction. The offset is deliberately face-normal based, rather than
+        // a whole-cube blur, so the cube has visible optical depth.
+        var shift = (highlighted ? 13 : 9) * (1 - fresnel * .42);
+        return new ImageBrush(_backdropSnapshot)
+        {
+            ViewboxUnits = BrushMappingMode.Absolute,
+            ViewportUnits = BrushMappingMode.Absolute,
+            Viewbox = new Rect(normal.X * shift, normal.Y * shift, RenderSize.Width, RenderSize.Height),
+            Viewport = new Rect(0, 0, RenderSize.Width, RenderSize.Height),
+            Stretch = Stretch.Fill,
+            Opacity = opacity * (highlighted ? .72 : .58)
+        };
+    }
+
     private static LinearGradientBrush GlassFaceBrush(Color tint, byte alpha, double fresnel)
     {
         static byte Scale(byte value, double amount) => (byte)Math.Clamp(value * amount, 0, 255);
 
-        var highlight = Color.FromArgb(Scale(alpha, .48 + fresnel * .22), 255, 255, 255);
-        var body = Color.FromArgb(Scale(alpha, .62), tint.R, tint.G, tint.B);
-        var clearCore = Color.FromArgb(Scale(alpha, .16), tint.R, tint.G, tint.B);
-        var returnReflection = Color.FromArgb(Scale(alpha, .36 + fresnel * .18), tint.R, tint.G, tint.B);
+        var highlight = Color.FromArgb(Scale(alpha, .52 + fresnel * .24), 255, 255, 255);
+        var body = Color.FromArgb(Scale(alpha, .70), tint.R, tint.G, tint.B);
+        var clearCore = Color.FromArgb(Scale(alpha, .28), tint.R, tint.G, tint.B);
+        var returnReflection = Color.FromArgb(Scale(alpha, .42 + fresnel * .22), tint.R, tint.G, tint.B);
         var brush = new LinearGradientBrush
         {
             StartPoint = new Point(0, 0),

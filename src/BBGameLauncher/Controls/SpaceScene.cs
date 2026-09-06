@@ -65,15 +65,15 @@ public sealed class SpaceScene : FrameworkElement
         base.OnRender(dc);
         _glassSurface.SetCubes(_cubes.Select((cube, index) =>
         {
-            var (center, size, opacity) = GetCubePresentation(cube, index == _selectedCube);
+            var (center, size, depth, opacity) = GetCubePresentation(cube, index == _selectedCube);
             return new GlassCubeFrame((float)center.X, (float)center.Y, (float)size,
                 (float)cube.AngleX, (float)cube.AngleY, (float)cube.AngleZ,
-                index == _selectedCube, (float)opacity);
+                (float)depth, index == _selectedCube, (float)opacity);
         }).ToArray());
 
     }
 
-    private (Point Center, double Size, double Opacity) GetCubePresentation(Cube cube, bool highlighted)
+    private (Point Center, double Size, double Depth, double Opacity) GetCubePresentation(Cube cube, bool highlighted)
     {
         var transition = Math.Clamp(_motionElapsed / .42, 0, 1);
         var eased = 1 - Math.Pow(1 - transition, 3);
@@ -81,16 +81,18 @@ public sealed class SpaceScene : FrameworkElement
         var bob = Math.Sin(_elapsed * cube.Speed + cube.Phase) * 18;
         var center = new Point(cube.X * RenderSize.Width + Math.Cos(_elapsed * cube.Speed + cube.Phase) * 18,
             cube.Y * RenderSize.Height + bob);
-        var zoom = _motion switch
+        // The mesh stays physically the same size. Transitions change its
+        // distance from the camera, so it naturally grows as it flies past.
+        var depth = _motion switch
         {
-            CubeMotion.Exiting when _forwardTransition => 1 + eased * 7,
-            CubeMotion.Exiting => 1 - eased * .94,
-            CubeMotion.Entering when _forwardTransition => .045 + eased * .955,
-            CubeMotion.Entering => 7 * (1 - eased) + eased,
-            _ => 1
+            CubeMotion.Exiting when _forwardTransition => -1300 * eased,
+            CubeMotion.Exiting => 2400 * eased,
+            CubeMotion.Entering when _forwardTransition => 2400 * (1 - eased),
+            CubeMotion.Entering => -820 * (1 - eased),
+            _ => 0
         };
-        var size = cube.Size * (1 + Math.Sin(_elapsed * .6 + cube.Phase) * .08) * (highlighted ? 1.12 : 1) * zoom;
-        return (center, Math.Max(0, size), opacity);
+        var size = cube.Size * (1 + Math.Sin(_elapsed * .6 + cube.Phase) * .08) * (highlighted ? 1.12 : 1);
+        return (center, size, depth, opacity);
     }
 
     private void RebuildCubes(int menuItemCount)

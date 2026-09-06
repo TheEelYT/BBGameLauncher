@@ -139,7 +139,6 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
         var view = Matrix4x4.CreateLookAt(camera, Vector3.Zero, Vector3.UnitY);
         var projection = Matrix4x4.CreatePerspectiveFieldOfView(fieldOfView, width / (float)height, 1f, 8000f);
         EnsureSceneTarget(e.Device, width, height);
-        EnsureExitTargets(e.Device, width, height);
         e.Context.UpdateSubresource(new FrameConstants
         {
             ViewProjection = view * projection,
@@ -198,14 +197,20 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
         e.Context.PSSetSampler(0, _environmentSampler);
         e.Context.PSSetShaderResource(1, _sceneColorResource);
         e.Context.PSSetSampler(1, _sceneSampler);
-        e.Context.PSSetSampler(2, _exitSampler);
+        e.Context.PSSetShaderResource(2, null);
 
         // Keeping one stable, frame-level order avoids the face-bucket pop the
         // old WPF implementation exhibited when rotating through a face plane.
         foreach (var cube in _cubes.OrderByDescending(cube => cube.Size))
         {
             if (cube.Size <= .01f || cube.Opacity <= .001f) continue;
-            var position = new Vector3(cube.X - width * .5f, height * .5f - cube.Y, 0);
+            // Move the cube along its camera ray. Its screen anchor remains in
+            // place while perspective, rather than mesh scaling, creates the
+            // fly-past transition.
+            var rayScale = (cameraDistance + cube.Depth) / cameraDistance;
+            // D3D's camera basis is mirrored from WPF's screen X axis.
+            var position = new Vector3((width * .5f - cube.X) * rayScale,
+                (height * .5f - cube.Y) * rayScale, cube.Depth);
             var rotation = Matrix4x4.CreateRotationX(cube.AngleX) * Matrix4x4.CreateRotationY(cube.AngleY) * Matrix4x4.CreateRotationZ(cube.AngleZ);
             var world = Matrix4x4.CreateScale(cube.Size) * rotation * Matrix4x4.CreateTranslation(position);
             Matrix4x4.Invert(world, out var inverseWorld);
@@ -216,25 +221,6 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
                 Material = new Vector4(cube.Selected ? 1 : 0, cube.Opacity, cube.Size, 0)
             }, _objectConstants);
 
-            // Pass 1: record the actual rear surface for this cube. The front
-            // pass samples this texture, rather than estimating a box exit from
-            // interpolated data that has already been projected to the screen.
-            e.Context.PSSetShaderResource(2, null);
-            e.Context.OMSetRenderTargets(_exitPositionView, _exitDepthView);
-            e.Context.ClearRenderTargetView(_exitPositionView!, new Color4(0, 0, 0, 0));
-            e.Context.ClearDepthStencilView(_exitDepthView!, DepthStencilClearFlags.Depth, 1, 0);
-            e.Context.OMSetBlendState(null);
-            e.Context.OMSetDepthStencilState(null);
-            e.Context.PSSetShader(_backPositionShader);
-            e.Context.Draw(36, 0);
-
-            // Pass 2: refract through the front surface into the recorded rear
-            // surface, then alpha-composite the resulting solid glass volume.
-            e.Context.OMSetRenderTargets(e.Surface.ColorTextureView!, e.Surface.DepthStencilView);
-            e.Context.OMSetBlendState(_glassBlend);
-            e.Context.OMSetDepthStencilState(null);
-            e.Context.PSSetShader(_pixelShader);
-            e.Context.PSSetShaderResource(2, _exitPositionResource);
             e.Context.Draw(36, 0);
         }
     }
@@ -416,4 +402,4 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
     [StructLayout(LayoutKind.Sequential)] private struct ObjectConstants { public Matrix4x4 World; public Matrix4x4 InverseWorld; public Vector4 Material; }
 }
 
-public readonly record struct GlassCubeFrame(float X, float Y, float Size, float AngleX, float AngleY, float AngleZ, bool Selected, float Opacity);
+public readonly record struct GlassCubeFrame(float X, float Y, float Size, float AngleX, float AngleY, float AngleZ, float Depth, bool Selected, float Opacity);

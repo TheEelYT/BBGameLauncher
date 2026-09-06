@@ -143,48 +143,23 @@ float4 PSMain(PSInput input) : SV_TARGET
     // independent glass panes is what made the old result read as hollow.
     if (dot(normal, -incident) <= 0) discard;
 
-    float3 entry = input.LocalPosition;
-    float3 entryNormal = normalize(input.LocalNormal);
     float2 screenUv = input.Position.xy * Viewport.zw;
-    float4 exitSample = ExitPosition.Sample(ExitSampler, screenUv);
-    // Some D3D9/WPF interop drivers do not preserve the alpha channel of the
-    // intermediate half-float target. Fall back to the opposite cube surface
-    // instead of discarding the entire object while that target is unavailable.
-    float3 exitPoint = exitSample.a < 0.5 ? -entry : exitSample.xyz;
-    float3 insideRay = normalize(exitPoint - entry);
-    float travel = length(exitPoint - entry);
-    float3 exitNormal = BoxNormal(exitPoint);
-    float3 exitRay = refract(insideRay, exitNormal, 1.33);
-    if (dot(exitRay, exitRay) < 0.001) exitRay = reflect(insideRay, exitNormal);
-
     float3 reflectedDirection = reflect(incident, normal);
-    float3 transmissionDirection = normalize(mul(float4(exitRay, 0), World).xyz);
-    float3 internalBounce = reflect(reflect(insideRay, exitNormal), entryNormal);
-    internalBounce = normalize(mul(float4(internalBounce, 0), World).xyz);
     float3 reflection = EnvironmentMap.Sample(EnvironmentSampler, reflectedDirection).rgb;
-    float3 cubemapTransmission = EnvironmentMap.Sample(EnvironmentSampler, transmissionDirection).rgb;
-    float4 exitWorld = mul(float4(exitPoint, 1), World);
-    float4 exitClip = mul(exitWorld, ViewProjection);
-    float2 refractionUv = exitClip.xy / exitClip.w * float2(0.5, -0.5) + 0.5;
-    float3 transmission = SceneBackdrop.Sample(SceneSampler, saturate(refractionUv)).rgb;
-    float3 trappedReflection = EnvironmentMap.Sample(EnvironmentSampler, internalBounce).rgb;
     float facing = saturate(dot(-incident, normal));
     float fresnel = 0.035 + 0.965 * pow(1.0 - facing, 5.0);
-    float3 absorption = exp(-travel * float3(0.14, 0.055, 0.015));
-    float3 glass = lerp(transmission, cubemapTransmission, 0.16) * absorption;
-    glass = lerp(glass, reflection, fresnel);
-    glass += trappedReflection * (0.12 + fresnel * 0.18) * absorption;
+    // Screen-space refraction samples the same D3D scene that is visible behind
+    // the cube. This stable surface pass is the baseline for the later volume
+    // pass; it never depends on an invalid intermediate back-face texture.
+    float2 refractionOffset = normal.xy * (0.010 + (1.0 - facing) * 0.018);
+    float3 transmission = SceneBackdrop.Sample(SceneSampler, saturate(screenUv + refractionOffset)).rgb;
+    float3 glass = lerp(transmission * float3(0.86, 0.94, 1.0), reflection, fresnel);
+    glass += fresnel * float3(0.22, 0.34, 0.48);
 
-    // Find the blue emitter's distance from the internal optical path. It is a
-    // real center-volume contribution, not a radial texture on each cube face.
-    float3 path = exitPoint - entry;
-    float pathLengthSq = max(dot(path, path), 0.0001);
-    float pathT = saturate(dot(-entry, path) / pathLengthSq);
-    float centerDistance = length(entry + path * pathT);
-    float blueCore = Material.x * exp(-centerDistance * centerDistance * 13.0) * exp(-travel * 0.24);
-    glass += blueCore * float3(0.025, 0.44, 1.25);
-    glass += fresnel * float3(0.16, 0.27, 0.40);
+    // Selected cubes get a restrained blue transmission boost until the
+    // internal emissive-volume draw is added to the rebuilt scene pipeline.
+    glass += Material.x * (1.0 - fresnel) * float3(0.008, 0.10, 0.25);
 
-    float opacity = Material.y * lerp(0.54, 0.68, fresnel);
+    float opacity = Material.y * lerp(0.32, 0.54, fresnel);
     return float4(glass * opacity, opacity);
 }

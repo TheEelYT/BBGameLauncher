@@ -134,47 +134,91 @@ float4 PSBack(PSInput input) : SV_TARGET
     return float4(input.LocalPosition, 1);
 }
 
+float BoxExitDistance(float3 origin, float3 direction)
+{
+    float exitDistance = 100000.0;
+    if (abs(direction.x) > 0.00001)
+    {
+        float axisDistance = ((direction.x > 0.0 ? 1.0 : -1.0) - origin.x) / direction.x;
+        if (axisDistance > 0.0001) exitDistance = min(exitDistance, axisDistance);
+    }
+    if (abs(direction.y) > 0.00001)
+    {
+        float axisDistance = ((direction.y > 0.0 ? 1.0 : -1.0) - origin.y) / direction.y;
+        if (axisDistance > 0.0001) exitDistance = min(exitDistance, axisDistance);
+    }
+    if (abs(direction.z) > 0.00001)
+    {
+        float axisDistance = ((direction.z > 0.0 ? 1.0 : -1.0) - origin.z) / direction.z;
+        if (axisDistance > 0.0001) exitDistance = min(exitDistance, axisDistance);
+    }
+    return exitDistance;
+}
+
+float2 ProjectToUv(float3 worldPosition)
+{
+    float4 clip = mul(float4(worldPosition, 1), ViewProjection);
+    return clip.xy / clip.w * float2(0.5, -0.5) + 0.5;
+}
+
 float4 PSMain(PSInput input) : SV_TARGET
 {
+    const float glassIor = 1.50;
     float3 incident = normalize(input.WorldPosition - Camera.xyz);
-    float3 normal = normalize(input.WorldNormal);
+    float3 entryNormal = normalize(input.WorldNormal);
 
-    if (Material.w > 0.5)
-    {
-        float coreFacing = saturate(dot(normal, -incident));
-        float coreLight = 0.42 + 0.58 * pow(coreFacing, 0.55);
-        float coreAlpha = Material.y * (0.68 + coreFacing * 0.22);
-        // AlphaBlend expects straight (not premultiplied) source colour.  The
-        // old premultiplied return was multiplied by alpha a second time in
-        // the blend unit, which made the emissive centre almost disappear.
-        return float4(float3(0.02, 0.38, 1.15) * coreLight, coreAlpha);
-    }
+    // Shade only the first surface. The rest of the cube is traversed below as
+    // one glass volume, so its rear faces cannot appear as detached panes.
+    if (dot(entryNormal, -incident) <= 0) discard;
 
-    // Back faces are reached by the volume ray below. Blending them again as
-    // independent glass panes is what made the old result read as hollow.
-    if (dot(normal, -incident) <= 0) discard;
+    float3 glassDirection = refract(incident, entryNormal, 1.0 / glassIor);
+    float3 localDirection = normalize(mul(float4(glassDirection, 0), InverseWorld).xyz);
+    float3 localEntry = input.LocalPosition - input.LocalNormal * 0.001;
+    float exitDistance = BoxExitDistance(localEntry, localDirection);
+    float3 localExit = localEntry + localDirection * exitDistance;
+    float3 localExitNormal = BoxNormal(localExit);
+    float3 worldExit = mul(float4(localExit, 1), World).xyz;
+    float3 exitNormal = normalize(mul(float4(localExitNormal, 0), World).xyz);
 
-    float2 screenUv = input.Position.xy * Viewport.zw;
-    float3 reflectedDirection = reflect(incident, normal);
+    // Bend the ray back into air at the opposite face. Total internal
+    // reflection falls back to a reflected internal ray instead of vanishing.
+    float3 outgoing = refract(glassDirection, -exitNormal, glassIor);
+    float transmittedRay = step(0.00001, dot(outgoing, outgoing));
+    outgoing = normalize(lerp(reflect(glassDirection, exitNormal), outgoing, transmittedRay));
+
+    // Project the actual exit ray into the already-rendered 3D starfield.
+    // This keeps stars localized instead of stretching one texture over a face.
+    float3 samplePoint = worldExit + outgoing * Material.z * 1.35;
+    float2 refractedUv = saturate(ProjectToUv(samplePoint));
+    float2 dispersion = (refractedUv - ProjectToUv(worldExit)) * 0.035;
+    float3 transmission;
+    transmission.r = SceneBackdrop.Sample(SceneSampler, saturate(refractedUv + dispersion)).r;
+    transmission.g = SceneBackdrop.Sample(SceneSampler, refractedUv).g;
+    transmission.b = SceneBackdrop.Sample(SceneSampler, saturate(refractedUv - dispersion)).b;
+
+    float3 reflectedDirection = reflect(incident, entryNormal);
     float3 reflection = EnvironmentMap.Sample(EnvironmentSampler, reflectedDirection).rgb;
-    float facing = saturate(dot(-incident, normal));
+    float3 internalReflection = EnvironmentMap.Sample(EnvironmentSampler, reflect(glassDirection, exitNormal)).rgb;
+    float facing = saturate(dot(-incident, entryNormal));
     float fresnel = 0.035 + 0.965 * pow(1.0 - facing, 5.0);
-    // Screen-space refraction samples the same D3D scene that is visible behind
-    // the cube. This stable surface pass is the baseline for the later volume
-    // pass; it never depends on an invalid intermediate back-face texture.
-    float2 refractionOffset = normal.xy * (0.010 + (1.0 - facing) * 0.018);
-    float3 transmission = SceneBackdrop.Sample(SceneSampler, saturate(screenUv + refractionOffset)).rgb;
-    float3 keyLight = float3(0.16, 0.34, 0.58) * (0.38 + 0.62 * saturate(dot(normal, normalize(float3(-0.38, 0.58, -0.72)))));
-    float3 glass = lerp(transmission * float3(0.86, 0.94, 1.0), reflection * 1.35, fresnel);
-    glass += keyLight * (0.48 + fresnel * 0.75);
-    glass += fresnel * float3(0.34, 0.56, 0.82);
+    float exitFacing = saturate(dot(glassDirection, exitNormal));
+    float exitFresnel = 0.035 + 0.965 * pow(1.0 - exitFacing, 5.0);
+    float thickness = saturate(exitDistance / 3.464);
+    float3 absorption = exp(-float3(0.13, 0.055, 0.018) * exitDistance);
 
-    // Selected cubes get a restrained blue transmission boost until the
-    // internal emissive-volume draw is added to the rebuilt scene pipeline.
-    glass += Material.x * (1.0 - fresnel) * float3(0.008, 0.10, 0.25);
+    float3 glass = transmission * absorption;
+    glass = lerp(glass, reflection * 1.15, fresnel);
+    glass += internalReflection * (0.08 + exitFresnel * 0.24);
+    glass += fresnel * float3(0.20, 0.48, 0.82);
 
-    float opacity = Material.y * lerp(0.43, 0.66, fresnel);
-    // Keep the glass colour straight for BlendDescription.AlphaBlend.  This
-    // preserves the bright cyan rim instead of attenuating it twice.
+    // The selected light is evaluated along the ray segment inside the cube.
+    // It therefore occupies the geometric centre without a separate sphere or
+    // a face-aligned glow texture.
+    float closestDistance = clamp(dot(-localEntry, localDirection), 0.0, exitDistance);
+    float3 closestPoint = localEntry + localDirection * closestDistance;
+    float coreGlow = Material.x * exp(-dot(closestPoint, closestPoint) * 7.5) * saturate(exitDistance * 0.55);
+    glass += coreGlow * float3(0.015, 0.34, 1.25);
+
+    float opacity = Material.y * (0.24 + fresnel * 0.36 + thickness * 0.10);
     return float4(glass, opacity);
 }

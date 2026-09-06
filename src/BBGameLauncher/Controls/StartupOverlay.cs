@@ -49,6 +49,12 @@ public sealed class StartupOverlay : Grid
         center.Children.Add(name);
         name.BeginAnimation(OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(650)) { BeginTime = TimeSpan.FromMilliseconds(830) });
 
-        BeginAnimation(OpacityProperty, new DoubleAnimation(1, 0, TimeSpan.FromMilliseconds(800)) { BeginTime = TimeSpan.FromMilliseconds(2450), FillBehavior = FillBehavior.Stop, Completed = (_, _) => Visibility = Visibility.Collapsed });
+        var fadeOut = new DoubleAnimation(1, 0, TimeSpan.FromMilliseconds(800))
+        {
+            BeginTime = TimeSpan.FromMilliseconds(2450),
+            FillBehavior = FillBehavior.Stop
+        };
+        fadeOut.Completed += (_, _) => Visibility = Visibility.Collapsed;
+        BeginAnimation(OpacityProperty, fadeOut);
     }
 }

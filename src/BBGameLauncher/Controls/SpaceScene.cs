@@ -248,16 +248,18 @@ public sealed class SpaceScene : FrameworkElement
             dc.DrawGeometry(fill, null, Polygon(facePoints));
         }
 
-        // The far walls are the lens: refract the scene only through those
-        // surfaces, then place the emitted light inside the cube before the
-        // near walls are drawn over it.
-        foreach (var face in orderedFaces.Where(face => FaceNormal(vertices[face.Indices[0]], vertices[face.Indices[1]], vertices[face.Indices[2]]).Z < 0))
-            DrawGlassFace(face, refractBackdrop: true);
+        // Keep one depth-sorted pass. Splitting faces into back/front buckets
+        // caused the visible popping whenever a rotating face crossed the
+        // bucket boundary.
+        foreach (var face in orderedFaces)
+        {
+            var normal = FaceNormal(vertices[face.Indices[0]], vertices[face.Indices[1]], vertices[face.Indices[2]]);
+            DrawGlassFace(face, refractBackdrop: normal.Z < 0);
+        }
 
+        // This stays after the stable surface pass until the cube renderer is
+        // replaced by the per-pixel environment-map pass.
         DrawInternalGlow(dc, center, size, opacity, highlighted);
-
-        foreach (var face in orderedFaces.Where(face => FaceNormal(vertices[face.Indices[0]], vertices[face.Indices[1]], vertices[face.Indices[2]]).Z >= 0))
-            DrawGlassFace(face, refractBackdrop: false);
     }
 
     private (Point Center, double Size) GetCubeLayout(Cube cube, bool highlighted)

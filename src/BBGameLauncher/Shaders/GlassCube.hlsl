@@ -18,6 +18,77 @@ Texture2D SceneBackdrop : register(t1);
 SamplerState SceneSampler : register(s1);
 Texture2D ExitPosition : register(t2);
 SamplerState ExitSampler : register(s2);
+Texture2D SceneColor : register(t3);
+SamplerState SceneColorSampler : register(s3);
+
+struct FullscreenOutput
+{
+    float4 Position : SV_POSITION;
+    float2 Uv : TEXCOORD0;
+};
+
+FullscreenOutput VSFullscreen(uint vertexId : SV_VertexID)
+{
+    FullscreenOutput output;
+    float2 position = vertexId == 0 ? float2(-1, -1) : (vertexId == 1 ? float2(-1, 3) : float2(3, -1));
+    output.Position = float4(position, 0, 1);
+    output.Uv = position * float2(0.5, -0.5) + 0.5;
+    return output;
+}
+
+float Nebula(float2 uv, float2 center, float radius)
+{
+    float2 d = uv - center;
+    d.x *= 1.9;
+    return exp(-dot(d, d) / (radius * radius));
+}
+
+float4 PSBackground(FullscreenOutput input) : SV_TARGET
+{
+    float vertical = 1.0 - input.Uv.y;
+    float3 color = lerp(float3(0.002, 0.006, 0.018), float3(0.008, 0.018, 0.055), vertical);
+    color += Nebula(input.Uv, float2(0.20, 0.47), 0.30) * float3(0.06, 0.055, 0.21);
+    color += Nebula(input.Uv, float2(0.79, 0.23), 0.22) * float3(0.012, 0.055, 0.12);
+    color += Nebula(input.Uv, float2(0.67, 0.73), 0.18) * float3(0.006, 0.035, 0.09);
+    return float4(color, 1);
+}
+
+float4 PSComposite(FullscreenOutput input) : SV_TARGET
+{
+    return SceneColor.Sample(SceneColorSampler, input.Uv);
+}
+
+struct StarInput
+{
+    float3 Position : POSITION;
+    float3 Color : COLOR;
+    float2 Corner : TEXCOORD0;
+    float Size : TEXCOORD1;
+};
+
+struct StarOutput
+{
+    float4 Position : SV_POSITION;
+    float3 Color : COLOR;
+    float2 Corner : TEXCOORD0;
+};
+
+StarOutput VSStar(StarInput input)
+{
+    StarOutput output;
+    float3 worldPosition = input.Position + float3(input.Corner * input.Size, 0);
+    output.Position = mul(float4(worldPosition, 1), ViewProjection);
+    output.Color = input.Color;
+    output.Corner = input.Corner;
+    return output;
+}
+
+float4 PSStar(StarOutput input) : SV_TARGET
+{
+    float r = length(input.Corner);
+    float intensity = exp(-r * r * 3.2);
+    return float4(input.Color * intensity, intensity * 0.82);
+}
 
 struct VSInput
 {

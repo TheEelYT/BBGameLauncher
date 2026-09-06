@@ -24,6 +24,18 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
     private ID3D11PixelShader? _pixelShader;
     private ID3D11PixelShader? _backPositionShader;
     private ID3D11InputLayout? _inputLayout;
+    private ID3D11Buffer? _stars;
+    private ID3D11VertexShader? _backgroundVertexShader;
+    private ID3D11PixelShader? _backgroundPixelShader;
+    private ID3D11PixelShader? _compositePixelShader;
+    private ID3D11VertexShader? _starVertexShader;
+    private ID3D11PixelShader? _starPixelShader;
+    private ID3D11InputLayout? _starInputLayout;
+    private ID3D11BlendState? _starBlend;
+    private ID3D11Texture2D? _sceneColor;
+    private ID3D11RenderTargetView? _sceneColorView;
+    private ID3D11ShaderResourceView? _sceneColorResource;
+    private ID3D11SamplerState? _sceneSampler;
     private ID3D11Texture2D? _environment;
     private ID3D11ShaderResourceView? _environmentView;
     private ID3D11SamplerState? _environmentSampler;
@@ -69,6 +81,7 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
     {
         var vertices = CreateCubeVertices();
         _vertices = e.Device.CreateBuffer(vertices, BindFlags.VertexBuffer);
+        _stars = e.Device.CreateBuffer(CreateStarVertices(), BindFlags.VertexBuffer);
         _frameConstants = e.Device.CreateBuffer(new BufferDescription((uint)Marshal.SizeOf<FrameConstants>(), BindFlags.ConstantBuffer));
         _objectConstants = e.Device.CreateBuffer(new BufferDescription((uint)Marshal.SizeOf<ObjectConstants>(), BindFlags.ConstantBuffer));
 
@@ -79,29 +92,41 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
         _vertexShader = e.Device.CreateVertexShader(vertexBytecode.Span);
         _pixelShader = e.Device.CreatePixelShader(pixelBytecode.Span);
         _backPositionShader = e.Device.CreatePixelShader(Compiler.Compile(shaderSource, "PSBack", shaderPath, "ps_4_0").Span);
+        _backgroundVertexShader = e.Device.CreateVertexShader(Compiler.Compile(shaderSource, "VSFullscreen", shaderPath, "vs_4_0").Span);
+        _backgroundPixelShader = e.Device.CreatePixelShader(Compiler.Compile(shaderSource, "PSBackground", shaderPath, "ps_4_0").Span);
+        _compositePixelShader = e.Device.CreatePixelShader(Compiler.Compile(shaderSource, "PSComposite", shaderPath, "ps_4_0").Span);
+        _starVertexShader = e.Device.CreateVertexShader(Compiler.Compile(shaderSource, "VSStar", shaderPath, "vs_4_0").Span);
+        _starPixelShader = e.Device.CreatePixelShader(Compiler.Compile(shaderSource, "PSStar", shaderPath, "ps_4_0").Span);
         _inputLayout = e.Device.CreateInputLayout(
         [
             new InputElementDescription("POSITION", 0, Format.R32G32B32_Float, 0, 0),
             new InputElementDescription("NORMAL", 0, Format.R32G32B32_Float, 12, 0)
         ], vertexBytecode.Span);
+        _starInputLayout = e.Device.CreateInputLayout(
+        [
+            new InputElementDescription("POSITION", 0, Format.R32G32B32_Float, 0, 0),
+            new InputElementDescription("COLOR", 0, Format.R32G32B32_Float, 12, 0),
+            new InputElementDescription("TEXCOORD", 0, Format.R32G32_Float, 24, 0),
+            new InputElementDescription("TEXCOORD", 1, Format.R32_Float, 32, 0)
+        ], Compiler.Compile(shaderSource, "VSStar", shaderPath, "vs_4_0").Span);
 
         _environment = CreateEnvironmentMap(e.Device, e.Context);
         _environmentView = e.Device.CreateShaderResourceView(_environment);
         _environmentSampler = e.Device.CreateSamplerState(SamplerDescription.LinearClamp);
         _backdropSampler = e.Device.CreateSamplerState(SamplerDescription.LinearClamp);
+        _sceneSampler = e.Device.CreateSamplerState(SamplerDescription.LinearClamp);
         _exitSampler = e.Device.CreateSamplerState(SamplerDescription.PointClamp);
-        UploadBackdrop(e.Device, e.Context);
         _glassBlend = e.Device.CreateBlendState(BlendDescription.AlphaBlend);
+        _starBlend = e.Device.CreateBlendState(BlendDescription.Additive);
         _rasterizer = e.Device.CreateRasterizerState(RasterizerDescription.CullNone);
     }
 
     private void OnDraw(object? sender, DrawEventArgs e)
     {
-        e.Context.ClearRenderTargetView(e.Surface.ColorTextureView!, new Color4(0, 0, 0, 0));
-        if (e.Surface.DepthStencilView != null)
-            e.Context.ClearDepthStencilView(e.Surface.DepthStencilView, DepthStencilClearFlags.Depth, 1, 0);
-        if (_vertices == null || _frameConstants == null || _objectConstants == null || _environmentView == null ||
-            _environmentSampler == null || _backdropView == null || _backdropSampler == null ||
+        if (_vertices == null || _stars == null || _frameConstants == null || _objectConstants == null || _environmentView == null ||
+            _environmentSampler == null || _backgroundVertexShader == null || _backgroundPixelShader == null ||
+            _compositePixelShader == null || _starVertexShader == null || _starPixelShader == null || _starInputLayout == null ||
+            _sceneSampler == null ||
             _vertexShader == null || _pixelShader == null || _backPositionShader == null || _inputLayout == null ||
             _exitSampler == null)
             return;
@@ -113,7 +138,7 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
         var camera = new Vector3(0, 0, -cameraDistance);
         var view = Matrix4x4.CreateLookAt(camera, Vector3.Zero, Vector3.UnitY);
         var projection = Matrix4x4.CreatePerspectiveFieldOfView(fieldOfView, width / (float)height, 1f, 8000f);
-        if (_backdropDirty) UploadBackdrop(e.Device, e.Context);
+        EnsureSceneTarget(e.Device, width, height);
         EnsureExitTargets(e.Device, width, height);
         e.Context.UpdateSubresource(new FrameConstants
         {
@@ -121,6 +146,37 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
             Camera = new Vector4(camera, 0),
             Viewport = new Vector4(width, height, 1f / width, 1f / height)
         }, _frameConstants);
+
+        // The complete space scene is rendered in D3D before any cube pass.
+        // This texture is both the visible background and the glass refraction source.
+        e.Context.PSSetShaderResource(1, null);
+        e.Context.PSSetShaderResource(3, null);
+        e.Context.OMSetRenderTargets(_sceneColorView, null);
+        e.Context.ClearRenderTargetView(_sceneColorView!, new Color4(0.003f, 0.012f, 0.035f, 1));
+        e.Context.OMSetBlendState(null);
+        e.Context.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
+        e.Context.IASetInputLayout(null);
+        e.Context.VSSetShader(_backgroundVertexShader);
+        e.Context.PSSetShader(_backgroundPixelShader);
+        e.Context.Draw(3, 0);
+        e.Context.OMSetBlendState(_starBlend);
+        e.Context.IASetInputLayout(_starInputLayout);
+        e.Context.IASetVertexBuffer(0, _stars, (uint)Marshal.SizeOf<StarVertex>());
+        e.Context.VSSetConstantBuffer(0, _frameConstants);
+        e.Context.VSSetShader(_starVertexShader);
+        e.Context.PSSetShader(_starPixelShader);
+        e.Context.Draw(1440, 0);
+
+        e.Context.OMSetRenderTargets(e.Surface.ColorTextureView!, e.Surface.DepthStencilView);
+        e.Context.ClearRenderTargetView(e.Surface.ColorTextureView!, new Color4(0, 0, 0, 1));
+        if (e.Surface.DepthStencilView != null) e.Context.ClearDepthStencilView(e.Surface.DepthStencilView, DepthStencilClearFlags.Depth, 1, 0);
+        e.Context.OMSetBlendState(null);
+        e.Context.IASetInputLayout(null);
+        e.Context.VSSetShader(_backgroundVertexShader);
+        e.Context.PSSetShader(_compositePixelShader);
+        e.Context.PSSetShaderResource(3, _sceneColorResource);
+        e.Context.PSSetSampler(3, _sceneSampler);
+        e.Context.Draw(3, 0);
 
         e.Context.OMSetBlendState(_glassBlend);
         e.Context.OMSetDepthStencilState(null);
@@ -135,8 +191,8 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
         e.Context.PSSetConstantBuffer(1, _objectConstants);
         e.Context.PSSetShaderResource(0, _environmentView);
         e.Context.PSSetSampler(0, _environmentSampler);
-        e.Context.PSSetShaderResource(1, _backdropView);
-        e.Context.PSSetSampler(1, _backdropSampler);
+        e.Context.PSSetShaderResource(1, _sceneColorResource);
+        e.Context.PSSetSampler(1, _sceneSampler);
         e.Context.PSSetSampler(2, _exitSampler);
 
         // Keeping one stable, frame-level order avoids the face-bucket pop the
@@ -181,12 +237,24 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
     private void OnUnloadContent(object? sender, DrawingSurfaceEventArgs e)
     {
         _vertices?.Dispose(); _vertices = null;
+        _stars?.Dispose(); _stars = null;
         _frameConstants?.Dispose(); _frameConstants = null;
         _objectConstants?.Dispose(); _objectConstants = null;
         _vertexShader?.Dispose(); _vertexShader = null;
         _pixelShader?.Dispose(); _pixelShader = null;
         _backPositionShader?.Dispose(); _backPositionShader = null;
         _inputLayout?.Dispose(); _inputLayout = null;
+        _backgroundVertexShader?.Dispose(); _backgroundVertexShader = null;
+        _backgroundPixelShader?.Dispose(); _backgroundPixelShader = null;
+        _compositePixelShader?.Dispose(); _compositePixelShader = null;
+        _starVertexShader?.Dispose(); _starVertexShader = null;
+        _starPixelShader?.Dispose(); _starPixelShader = null;
+        _starInputLayout?.Dispose(); _starInputLayout = null;
+        _starBlend?.Dispose(); _starBlend = null;
+        _sceneSampler?.Dispose(); _sceneSampler = null;
+        _sceneColorResource?.Dispose(); _sceneColorResource = null;
+        _sceneColorView?.Dispose(); _sceneColorView = null;
+        _sceneColor?.Dispose(); _sceneColor = null;
         _environmentSampler?.Dispose(); _environmentSampler = null;
         _environmentView?.Dispose(); _environmentView = null;
         _environment?.Dispose(); _environment = null;
@@ -282,6 +350,24 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
         _exitDepthView = device.CreateDepthStencilView(_exitDepth, new DepthStencilViewDescription(_exitDepth, DepthStencilViewDimension.Texture2D));
     }
 
+    private void EnsureSceneTarget(ID3D11Device device, int width, int height)
+    {
+        if (_sceneColor != null && _sceneColor.Description.Width == (uint)width && _sceneColor.Description.Height == (uint)height)
+            return;
+
+        _sceneColorResource?.Dispose(); _sceneColorResource = null;
+        _sceneColorView?.Dispose(); _sceneColorView = null;
+        _sceneColor?.Dispose(); _sceneColor = null;
+        _sceneColor = device.CreateTexture2D(new Texture2DDescription
+        {
+            Width = (uint)width, Height = (uint)height, ArraySize = 1, MipLevels = 1,
+            Format = Format.B8G8R8A8_UNorm, BindFlags = BindFlags.RenderTarget | BindFlags.ShaderResource,
+            Usage = ResourceUsage.Default, SampleDescription = new SampleDescription(1, 0)
+        });
+        _sceneColorView = device.CreateRenderTargetView(_sceneColor);
+        _sceneColorResource = device.CreateShaderResourceView(_sceneColor);
+    }
+
     private static CubeVertex[] CreateCubeVertices()
     {
         var p = new[]
@@ -299,7 +385,28 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
             .Select(index => new CubeVertex { Position = p[index], Normal = face.Item2 })).ToArray();
     }
 
+    private static StarVertex[] CreateStarVertices()
+    {
+        var random = new Random(4821);
+        var vertices = new List<StarVertex>(1440);
+        var corners = new[] { new Vector2(-1, -1), new Vector2(1, -1), new Vector2(1, 1), new Vector2(-1, -1), new Vector2(1, 1), new Vector2(-1, 1) };
+        for (var i = 0; i < 240; i++)
+        {
+            var depth = 120f + (float)random.NextDouble() * 4600f;
+            var spread = 820f + depth * .92f;
+            var position = new Vector3(((float)random.NextDouble() * 2 - 1) * spread,
+                ((float)random.NextDouble() * 2 - 1) * spread * .55f, depth);
+            var shade = .55f + (float)random.NextDouble() * .45f;
+            var color = new Vector3(.45f * shade, .72f * shade, shade);
+            var size = 1.4f + depth * .0011f + (float)random.NextDouble() * 2f;
+            foreach (var corner in corners)
+                vertices.Add(new StarVertex { Position = position, Color = color, Corner = corner, Size = size });
+        }
+        return vertices.ToArray();
+    }
+
     [StructLayout(LayoutKind.Sequential)] private struct CubeVertex { public Vector3 Position; public Vector3 Normal; }
+    [StructLayout(LayoutKind.Sequential)] private struct StarVertex { public Vector3 Position; public Vector3 Color; public Vector2 Corner; public float Size; }
     [StructLayout(LayoutKind.Sequential)] private struct FrameConstants { public Matrix4x4 ViewProjection; public Vector4 Camera; public Vector4 Viewport; }
     [StructLayout(LayoutKind.Sequential)] private struct ObjectConstants { public Matrix4x4 World; public Matrix4x4 InverseWorld; public Vector4 Material; }
 }

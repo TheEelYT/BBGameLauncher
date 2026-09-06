@@ -76,8 +76,10 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 entryNormal = normalize(input.LocalNormal);
     float2 screenUv = input.Position.xy * Viewport.zw;
     float4 exitSample = ExitPosition.Sample(ExitSampler, screenUv);
-    if (exitSample.a < 0.5) discard;
-    float3 exitPoint = exitSample.xyz;
+    // Some D3D9/WPF interop drivers do not preserve the alpha channel of the
+    // intermediate half-float target. Fall back to the opposite cube surface
+    // instead of discarding the entire object while that target is unavailable.
+    float3 exitPoint = exitSample.a < 0.5 ? -entry : exitSample.xyz;
     float3 insideRay = normalize(exitPoint - entry);
     float travel = length(exitPoint - entry);
     float3 exitNormal = BoxNormal(exitPoint);

@@ -6,12 +6,15 @@ namespace BBGameLauncher.Controls;
 /// <summary>Procedural starfield with perspective-projected, glass-like menu cubes.</summary>
 public sealed class SpaceScene : FrameworkElement
 {
+    private const double GlassIor = 1.350;
+    private const double GlassF0 = ((1 - GlassIor) / (1 + GlassIor)) * ((1 - GlassIor) / (1 + GlassIor));
     private readonly List<Star> _stars = [];
     private readonly List<Cube> _cubes = [];
     private readonly Random _random = new(4821);
     private TimeSpan _lastFrame;
     private double _elapsed;
     private double _motionElapsed;
+    private double _highlightStarted = -10;
     private int _selectedCube;
     private CubeMotion _motion;
     private bool _forwardTransition;
@@ -27,8 +30,11 @@ public sealed class SpaceScene : FrameworkElement
     public void SetMenuCubes(int menuItemCount, int selectedIndex)
     {
         menuItemCount = Math.Max(0, menuItemCount);
+        var rebuilding = _cubes.Count != menuItemCount;
+        if (selectedIndex != _selectedCube || rebuilding)
+            _highlightStarted = _elapsed;
         _selectedCube = Math.Clamp(selectedIndex, 0, Math.Max(0, menuItemCount - 1));
-        if (_cubes.Count == menuItemCount)
+        if (!rebuilding)
             return;
 
         _cubes.Clear();
@@ -130,9 +136,11 @@ public sealed class SpaceScene : FrameworkElement
             dc.DrawEllipse(glow, null, center, size * 1.9, size * 1.9);
         }
 
-        var ax = _elapsed * (.7 + cube.Speed * .35) + cube.Phase;
-        var ay = _elapsed * (.5 + cube.Speed * .25) + cube.Phase * 1.7;
-        var az = _elapsed * (.18 + cube.Speed * .1) + cube.Phase;
+        var flickAge = Math.Max(0, _elapsed - _highlightStarted);
+        var flick = highlighted ? Math.Sin(flickAge * 10.5) * Math.Exp(-flickAge * 2.7) * .92 : 0;
+        var ax = _elapsed * (.075 + cube.Speed * .045) + cube.Phase + flick * .72;
+        var ay = _elapsed * (.052 + cube.Speed * .035) + cube.Phase * 1.7 + flick;
+        var az = _elapsed * (.014 + cube.Speed * .012) + cube.Phase + flick * .18;
         var vertices = new[]
         {
             new Point3(-1, -1, -1), new Point3(1, -1, -1), new Point3(1, 1, -1), new Point3(-1, 1, -1),
@@ -151,12 +159,19 @@ public sealed class SpaceScene : FrameworkElement
 
         foreach (var face in faces.OrderBy(face => face.Indices.Average(index => vertices[index].Z)))
         {
-            var alpha = (byte)(opacity * (highlighted ? 112 : 46));
+            var normal = FaceNormal(vertices[face.Indices[0]], vertices[face.Indices[1]], vertices[face.Indices[2]]);
+            var facing = Math.Clamp(Math.Abs(normal.Z), 0, 1);
+            var fresnel = GlassF0 + (1 - GlassF0) * Math.Pow(1 - facing, 5);
+            var transmission = 1 - fresnel;
+            var alpha = (byte)(opacity * (highlighted ? 42 + fresnel * 125 : 20 + fresnel * 68));
+            // Thin glass transmits a cool background tint; the Fresnel term brings bright edge reflections.
+            var tint = Blend(face.Tint, Color.FromRgb(170, 236, 255), transmission * .22);
             var fill = new SolidColorBrush(Color.FromArgb(alpha, face.Tint.R, face.Tint.G, face.Tint.B));
+            fill.Color = Color.FromArgb(alpha, tint.R, tint.G, tint.B);
             dc.DrawGeometry(fill, null, Polygon(face.Indices.Select(index => projected[index]).ToArray()));
         }
 
-        var edgeAlpha = (byte)(opacity * (highlighted ? 235 : 132));
+        var edgeAlpha = (byte)(opacity * (highlighted ? 235 : 145));
         var edge = new Pen(new SolidColorBrush(Color.FromArgb(edgeAlpha, highlighted ? (byte)135 : (byte)95, highlighted ? (byte)231 : (byte)191, 255)), highlighted ? 1.65 : 1.05);
         foreach (var (from, to) in Edges)
             dc.DrawLine(edge, projected[from], projected[to]);
@@ -183,6 +198,20 @@ public sealed class SpaceScene : FrameworkElement
         var perspective = size * 2.1 / (4.3 - p.Z);
         return new Point(center.X + p.X * perspective, center.Y + p.Y * perspective);
     }
+
+    private static Point3 FaceNormal(Point3 a, Point3 b, Point3 c)
+    {
+        var u = new Point3(b.X - a.X, b.Y - a.Y, b.Z - a.Z);
+        var v = new Point3(c.X - a.X, c.Y - a.Y, c.Z - a.Z);
+        var normal = new Point3(u.Y * v.Z - u.Z * v.Y, u.Z * v.X - u.X * v.Z, u.X * v.Y - u.Y * v.X);
+        var length = Math.Sqrt(normal.X * normal.X + normal.Y * normal.Y + normal.Z * normal.Z);
+        return length == 0 ? normal : new Point3(normal.X / length, normal.Y / length, normal.Z / length);
+    }
+
+    private static Color Blend(Color from, Color to, double amount) => Color.FromRgb(
+        (byte)(from.R + (to.R - from.R) * amount),
+        (byte)(from.G + (to.G - from.G) * amount),
+        (byte)(from.B + (to.B - from.B) * amount));
 
     private static StreamGeometry Polygon(params Point[] points)
     {

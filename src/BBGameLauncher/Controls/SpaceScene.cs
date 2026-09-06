@@ -120,12 +120,10 @@ public sealed class SpaceScene : FrameworkElement
         var bob = Math.Sin(_elapsed * cube.Speed + cube.Phase) * 18;
         var baseCenter = new Point(cube.X * RenderSize.Width + Math.Cos(_elapsed * cube.Speed + cube.Phase) * 18,
             cube.Y * RenderSize.Height + bob);
-        var viewportCenter = new Point(RenderSize.Width * .5, RenderSize.Height * .5);
         var center = baseCenter;
         var zoom = 1d;
         if (_motion == CubeMotion.Exiting && _forwardTransition)
         {
-            center += (baseCenter - viewportCenter) * (eased * 3.4);
             zoom = 1 + eased * 7;
         }
         else if (_motion == CubeMotion.Exiting)
@@ -134,7 +132,6 @@ public sealed class SpaceScene : FrameworkElement
         }
         else if (_motion == CubeMotion.Entering && _forwardTransition)
         {
-            center = Lerp(viewportCenter, baseCenter, eased);
             zoom = .045 + eased * .955;
         }
         else if (_motion == CubeMotion.Entering)
@@ -213,10 +210,6 @@ public sealed class SpaceScene : FrameworkElement
         var perspective = size * 2.1 / (4.3 - p.Z);
         return new Point(center.X + p.X * perspective, center.Y + p.Y * perspective);
     }
-
-    private static Point Lerp(Point from, Point to, double amount) => new(
-        from.X + (to.X - from.X) * amount,
-        from.Y + (to.Y - from.Y) * amount);
 
     private static void AddFlick(Cube cube)
     {

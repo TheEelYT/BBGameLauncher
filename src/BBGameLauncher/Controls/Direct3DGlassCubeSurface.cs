@@ -22,6 +22,7 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
     private ID3D11Buffer? _objectConstants;
     private ID3D11VertexShader? _vertexShader;
     private ID3D11PixelShader? _pixelShader;
+    private ID3D11PixelShader? _backPositionShader;
     private ID3D11InputLayout? _inputLayout;
     private ID3D11Texture2D? _environment;
     private ID3D11ShaderResourceView? _environmentView;
@@ -33,6 +34,12 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
     private ID3D11Texture2D? _backdrop;
     private ID3D11ShaderResourceView? _backdropView;
     private ID3D11SamplerState? _backdropSampler;
+    private ID3D11Texture2D? _exitPosition;
+    private ID3D11RenderTargetView? _exitPositionView;
+    private ID3D11ShaderResourceView? _exitPositionResource;
+    private ID3D11Texture2D? _exitDepth;
+    private ID3D11DepthStencilView? _exitDepthView;
+    private ID3D11SamplerState? _exitSampler;
     private ID3D11BlendState? _glassBlend;
     private ID3D11RasterizerState? _rasterizer;
 
@@ -71,6 +78,7 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
         var pixelBytecode = Compiler.Compile(shaderSource, "PSMain", shaderPath, "ps_4_0");
         _vertexShader = e.Device.CreateVertexShader(vertexBytecode.Span);
         _pixelShader = e.Device.CreatePixelShader(pixelBytecode.Span);
+        _backPositionShader = e.Device.CreatePixelShader(Compiler.Compile(shaderSource, "PSBack", shaderPath, "ps_4_0").Span);
         _inputLayout = e.Device.CreateInputLayout(
         [
             new InputElementDescription("POSITION", 0, Format.R32G32B32_Float, 0, 0),
@@ -81,6 +89,7 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
         _environmentView = e.Device.CreateShaderResourceView(_environment);
         _environmentSampler = e.Device.CreateSamplerState(SamplerDescription.LinearClamp);
         _backdropSampler = e.Device.CreateSamplerState(SamplerDescription.LinearClamp);
+        _exitSampler = e.Device.CreateSamplerState(SamplerDescription.PointClamp);
         UploadBackdrop(e.Device, e.Context);
         _glassBlend = e.Device.CreateBlendState(BlendDescription.AlphaBlend);
         _rasterizer = e.Device.CreateRasterizerState(RasterizerDescription.CullNone);
@@ -93,7 +102,8 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
             e.Context.ClearDepthStencilView(e.Surface.DepthStencilView, DepthStencilClearFlags.Depth, 1, 0);
         if (_vertices == null || _frameConstants == null || _objectConstants == null || _environmentView == null ||
             _environmentSampler == null || _backdropView == null || _backdropSampler == null ||
-            _vertexShader == null || _pixelShader == null || _inputLayout == null)
+            _vertexShader == null || _pixelShader == null || _backPositionShader == null || _inputLayout == null ||
+            _exitSampler == null)
             return;
 
         var width = Math.Max(1, e.Surface.TextureWidth);
@@ -104,6 +114,7 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
         var view = Matrix4x4.CreateLookAt(camera, Vector3.Zero, Vector3.UnitY);
         var projection = Matrix4x4.CreatePerspectiveFieldOfView(fieldOfView, width / (float)height, 1f, 8000f);
         if (_backdropDirty) UploadBackdrop(e.Device, e.Context);
+        EnsureExitTargets(e.Device, width, height);
         e.Context.UpdateSubresource(new FrameConstants
         {
             ViewProjection = view * projection,
@@ -126,6 +137,7 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
         e.Context.PSSetSampler(0, _environmentSampler);
         e.Context.PSSetShaderResource(1, _backdropView);
         e.Context.PSSetSampler(1, _backdropSampler);
+        e.Context.PSSetSampler(2, _exitSampler);
 
         // Keeping one stable, frame-level order avoids the face-bucket pop the
         // old WPF implementation exhibited when rotating through a face plane.
@@ -142,6 +154,26 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
                 InverseWorld = inverseWorld,
                 Material = new Vector4(cube.Selected ? 1 : 0, cube.Opacity, cube.Size, 0)
             }, _objectConstants);
+
+            // Pass 1: record the actual rear surface for this cube. The front
+            // pass samples this texture, rather than estimating a box exit from
+            // interpolated data that has already been projected to the screen.
+            e.Context.PSSetShaderResource(2, null);
+            e.Context.OMSetRenderTargets(_exitPositionView, _exitDepthView);
+            e.Context.ClearRenderTargetView(_exitPositionView!, new Color4(0, 0, 0, 0));
+            e.Context.ClearDepthStencilView(_exitDepthView!, DepthStencilClearFlags.Depth, 1, 0);
+            e.Context.OMSetBlendState(null);
+            e.Context.OMSetDepthStencilState(null);
+            e.Context.PSSetShader(_backPositionShader);
+            e.Context.Draw(36, 0);
+
+            // Pass 2: refract through the front surface into the recorded rear
+            // surface, then alpha-composite the resulting solid glass volume.
+            e.Context.OMSetRenderTargets(e.Surface.ColorTextureView!, e.Surface.DepthStencilView);
+            e.Context.OMSetBlendState(_glassBlend);
+            e.Context.OMSetDepthStencilState(null);
+            e.Context.PSSetShader(_pixelShader);
+            e.Context.PSSetShaderResource(2, _exitPositionResource);
             e.Context.Draw(36, 0);
         }
     }
@@ -153,6 +185,7 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
         _objectConstants?.Dispose(); _objectConstants = null;
         _vertexShader?.Dispose(); _vertexShader = null;
         _pixelShader?.Dispose(); _pixelShader = null;
+        _backPositionShader?.Dispose(); _backPositionShader = null;
         _inputLayout?.Dispose(); _inputLayout = null;
         _environmentSampler?.Dispose(); _environmentSampler = null;
         _environmentView?.Dispose(); _environmentView = null;
@@ -160,6 +193,12 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
         _backdropSampler?.Dispose(); _backdropSampler = null;
         _backdropView?.Dispose(); _backdropView = null;
         _backdrop?.Dispose(); _backdrop = null;
+        _exitSampler?.Dispose(); _exitSampler = null;
+        _exitPositionResource?.Dispose(); _exitPositionResource = null;
+        _exitPositionView?.Dispose(); _exitPositionView = null;
+        _exitPosition?.Dispose(); _exitPosition = null;
+        _exitDepthView?.Dispose(); _exitDepthView = null;
+        _exitDepth?.Dispose(); _exitDepth = null;
         _glassBlend?.Dispose(); _glassBlend = null;
         _rasterizer?.Dispose(); _rasterizer = null;
     }
@@ -218,6 +257,29 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
         var pixels = _backdropPixels ?? new byte[] { 0, 0, 0, 255 };
         context.UpdateSubresource(pixels, _backdrop, 0, (uint)(width * 4));
         _backdropDirty = false;
+    }
+
+    private void EnsureExitTargets(ID3D11Device device, int width, int height)
+    {
+        if (_exitPosition != null && _exitPosition.Description.Width == (uint)width && _exitPosition.Description.Height == (uint)height)
+            return;
+
+        _exitPositionResource?.Dispose(); _exitPositionResource = null;
+        _exitPositionView?.Dispose(); _exitPositionView = null;
+        _exitPosition?.Dispose(); _exitPosition = null;
+        _exitDepthView?.Dispose(); _exitDepthView = null;
+        _exitDepth?.Dispose(); _exitDepth = null;
+
+        _exitPosition = device.CreateTexture2D(new Texture2DDescription
+        {
+            Width = (uint)width, Height = (uint)height, ArraySize = 1, MipLevels = 1,
+            Format = Format.R16G16B16A16_Float, BindFlags = BindFlags.RenderTarget | BindFlags.ShaderResource,
+            Usage = ResourceUsage.Default, SampleDescription = new SampleDescription(1, 0)
+        });
+        _exitPositionView = device.CreateRenderTargetView(_exitPosition);
+        _exitPositionResource = device.CreateShaderResourceView(_exitPosition);
+        _exitDepth = device.CreateTexture2D(Format.D32_Float, (uint)width, (uint)height, 1, 1, null, BindFlags.DepthStencil);
+        _exitDepthView = device.CreateDepthStencilView(_exitDepth, new DepthStencilViewDescription(_exitDepth, DepthStencilViewDimension.Texture2D));
     }
 
     private static CubeVertex[] CreateCubeVertices()

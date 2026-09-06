@@ -16,6 +16,8 @@ TextureCube EnvironmentMap : register(t0);
 SamplerState EnvironmentSampler : register(s0);
 Texture2D SceneBackdrop : register(t1);
 SamplerState SceneSampler : register(s1);
+Texture2D ExitPosition : register(t2);
+SamplerState ExitSampler : register(s2);
 
 struct VSInput
 {
@@ -44,20 +46,21 @@ PSInput VSMain(VSInput input)
     return output;
 }
 
-float RayBoxExit(float3 origin, float3 direction)
-{
-    float3 safeDirection = direction + (1.0 - abs(sign(direction))) * 0.0001;
-    float3 boundary = float3(direction.x >= 0 ? 1 : -1, direction.y >= 0 ? 1 : -1, direction.z >= 0 ? 1 : -1);
-    float3 distances = (boundary - origin) / safeDirection;
-    return max(0.001, min(distances.x, min(distances.y, distances.z)));
-}
-
 float3 BoxNormal(float3 cubePosition)
 {
     float3 a = abs(cubePosition);
     if (a.x > a.y && a.x > a.z) return float3(sign(cubePosition.x), 0, 0);
     if (a.y > a.z) return float3(0, sign(cubePosition.y), 0);
     return float3(0, 0, sign(cubePosition.z));
+}
+
+float4 PSBack(PSInput input) : SV_TARGET
+{
+    float3 incident = normalize(input.WorldPosition - Camera.xyz);
+    // Keep only physical rear faces. Depth testing then leaves the visible
+    // exit surface at every pixel for the front-face volume pass.
+    if (dot(normalize(input.WorldNormal), -incident) > 0) discard;
+    return float4(input.LocalPosition, 1);
 }
 
 float4 PSMain(PSInput input) : SV_TARGET
@@ -69,14 +72,14 @@ float4 PSMain(PSInput input) : SV_TARGET
     // independent glass panes is what made the old result read as hollow.
     if (dot(normal, -incident) <= 0) discard;
 
-    float3 cameraLocal = mul(float4(Camera.xyz, 1), InverseWorld).xyz;
     float3 entry = input.LocalPosition;
     float3 entryNormal = normalize(input.LocalNormal);
-    float3 cameraRay = normalize(entry - cameraLocal);
-    float3 insideRay = refract(cameraRay, entryNormal, 1.0 / 1.33);
-    if (dot(insideRay, insideRay) < 0.001) insideRay = cameraRay;
-    float travel = RayBoxExit(entry + insideRay * 0.001, insideRay);
-    float3 exitPoint = entry + insideRay * travel;
+    float2 screenUv = input.Position.xy * Viewport.zw;
+    float4 exitSample = ExitPosition.Sample(ExitSampler, screenUv);
+    if (exitSample.a < 0.5) discard;
+    float3 exitPoint = exitSample.xyz;
+    float3 insideRay = normalize(exitPoint - entry);
+    float travel = length(exitPoint - entry);
     float3 exitNormal = BoxNormal(exitPoint);
     float3 exitRay = refract(insideRay, exitNormal, 1.33);
     if (dot(exitRay, exitRay) < 0.001) exitRay = reflect(insideRay, exitNormal);

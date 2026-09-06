@@ -16,8 +16,10 @@ namespace BBGameLauncher.Controls;
 /// </summary>
 public sealed class Direct3DGlassCubeSurface : DrawingSurface
 {
+    private const int CoreVertexCount = 960;
     private GlassCubeFrame[] _cubes = [];
     private ID3D11Buffer? _vertices;
+    private ID3D11Buffer? _coreVertices;
     private ID3D11Buffer? _frameConstants;
     private ID3D11Buffer? _objectConstants;
     private ID3D11VertexShader? _vertexShader;
@@ -81,6 +83,7 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
     {
         var vertices = CreateCubeVertices();
         _vertices = e.Device.CreateBuffer(vertices, BindFlags.VertexBuffer);
+        _coreVertices = e.Device.CreateBuffer(CreateCoreVertices(), BindFlags.VertexBuffer);
         _stars = e.Device.CreateBuffer(CreateStarVertices(), BindFlags.VertexBuffer);
         _frameConstants = e.Device.CreateBuffer(new BufferDescription((uint)Marshal.SizeOf<FrameConstants>(), BindFlags.ConstantBuffer));
         _objectConstants = e.Device.CreateBuffer(new BufferDescription((uint)Marshal.SizeOf<ObjectConstants>(), BindFlags.ConstantBuffer));
@@ -123,7 +126,7 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
 
     private void OnDraw(object? sender, DrawEventArgs e)
     {
-        if (_vertices == null || _stars == null || _frameConstants == null || _objectConstants == null || _environmentView == null ||
+        if (_vertices == null || _coreVertices == null || _stars == null || _frameConstants == null || _objectConstants == null || _environmentView == null ||
             _environmentSampler == null || _backgroundVertexShader == null || _backgroundPixelShader == null ||
             _compositePixelShader == null || _starVertexShader == null || _starPixelShader == null || _starInputLayout == null ||
             _sceneSampler == null ||
@@ -214,6 +217,22 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
             var rotation = Matrix4x4.CreateRotationX(cube.AngleX) * Matrix4x4.CreateRotationY(cube.AngleY) * Matrix4x4.CreateRotationZ(cube.AngleZ);
             var world = Matrix4x4.CreateScale(cube.Size) * rotation * Matrix4x4.CreateTranslation(position);
             Matrix4x4.Invert(world, out var inverseWorld);
+
+            if (cube.Selected)
+            {
+                var coreWorld = Matrix4x4.CreateScale(cube.Size * .28f) * rotation * Matrix4x4.CreateTranslation(position);
+                Matrix4x4.Invert(coreWorld, out var inverseCoreWorld);
+                e.Context.UpdateSubresource(new ObjectConstants
+                {
+                    World = coreWorld,
+                    InverseWorld = inverseCoreWorld,
+                    Material = new Vector4(1, cube.Opacity, cube.Size, 1)
+                }, _objectConstants);
+                e.Context.IASetVertexBuffer(0, _coreVertices, (uint)Marshal.SizeOf<CubeVertex>());
+                e.Context.Draw(CoreVertexCount, 0);
+                e.Context.IASetVertexBuffer(0, _vertices, (uint)Marshal.SizeOf<CubeVertex>());
+            }
+
             e.Context.UpdateSubresource(new ObjectConstants
             {
                 World = world,
@@ -228,6 +247,7 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
     private void OnUnloadContent(object? sender, DrawingSurfaceEventArgs e)
     {
         _vertices?.Dispose(); _vertices = null;
+        _coreVertices?.Dispose(); _coreVertices = null;
         _stars?.Dispose(); _stars = null;
         _frameConstants?.Dispose(); _frameConstants = null;
         _objectConstants?.Dispose(); _objectConstants = null;
@@ -375,6 +395,35 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
         return faces.SelectMany(face => new[] { face.Item1[0], face.Item1[1], face.Item1[2], face.Item1[0], face.Item1[2], face.Item1[3] }
             .Select(index => new CubeVertex { Position = p[index], Normal = face.Item2 })).ToArray();
     }
+
+    private static CubeVertex[] CreateCoreVertices()
+    {
+        const int slices = 16;
+        const int stacks = 10;
+        var vertices = new List<CubeVertex>(CoreVertexCount);
+        for (var stack = 0; stack < stacks; stack++)
+        {
+            var theta0 = MathF.PI * stack / stacks;
+            var theta1 = MathF.PI * (stack + 1) / stacks;
+            for (var slice = 0; slice < slices; slice++)
+            {
+                var phi0 = MathF.Tau * slice / slices;
+                var phi1 = MathF.Tau * (slice + 1) / slices;
+                var a = SpherePoint(theta0, phi0);
+                var b = SpherePoint(theta1, phi0);
+                var c = SpherePoint(theta1, phi1);
+                var d = SpherePoint(theta0, phi1);
+                vertices.AddRange([
+                    new CubeVertex { Position = a, Normal = a }, new CubeVertex { Position = b, Normal = b }, new CubeVertex { Position = c, Normal = c },
+                    new CubeVertex { Position = a, Normal = a }, new CubeVertex { Position = c, Normal = c }, new CubeVertex { Position = d, Normal = d }
+                ]);
+            }
+        }
+        return vertices.ToArray();
+    }
+
+    private static Vector3 SpherePoint(float theta, float phi) =>
+        new(MathF.Sin(theta) * MathF.Cos(phi), MathF.Cos(theta), MathF.Sin(theta) * MathF.Sin(phi));
 
     private static StarVertex[] CreateStarVertices()
     {

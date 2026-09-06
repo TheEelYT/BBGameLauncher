@@ -139,6 +139,17 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 incident = normalize(input.WorldPosition - Camera.xyz);
     float3 normal = normalize(input.WorldNormal);
 
+    if (Material.w > 0.5)
+    {
+        float coreFacing = saturate(dot(normal, -incident));
+        float coreLight = 0.42 + 0.58 * pow(coreFacing, 0.55);
+        float coreAlpha = Material.y * (0.68 + coreFacing * 0.22);
+        // AlphaBlend expects straight (not premultiplied) source colour.  The
+        // old premultiplied return was multiplied by alpha a second time in
+        // the blend unit, which made the emissive centre almost disappear.
+        return float4(float3(0.02, 0.38, 1.15) * coreLight, coreAlpha);
+    }
+
     // Back faces are reached by the volume ray below. Blending them again as
     // independent glass panes is what made the old result read as hollow.
     if (dot(normal, -incident) <= 0) discard;
@@ -153,13 +164,17 @@ float4 PSMain(PSInput input) : SV_TARGET
     // pass; it never depends on an invalid intermediate back-face texture.
     float2 refractionOffset = normal.xy * (0.010 + (1.0 - facing) * 0.018);
     float3 transmission = SceneBackdrop.Sample(SceneSampler, saturate(screenUv + refractionOffset)).rgb;
-    float3 glass = lerp(transmission * float3(0.86, 0.94, 1.0), reflection, fresnel);
-    glass += fresnel * float3(0.22, 0.34, 0.48);
+    float3 keyLight = float3(0.16, 0.34, 0.58) * (0.38 + 0.62 * saturate(dot(normal, normalize(float3(-0.38, 0.58, -0.72)))));
+    float3 glass = lerp(transmission * float3(0.86, 0.94, 1.0), reflection * 1.35, fresnel);
+    glass += keyLight * (0.48 + fresnel * 0.75);
+    glass += fresnel * float3(0.34, 0.56, 0.82);
 
     // Selected cubes get a restrained blue transmission boost until the
     // internal emissive-volume draw is added to the rebuilt scene pipeline.
     glass += Material.x * (1.0 - fresnel) * float3(0.008, 0.10, 0.25);
 
-    float opacity = Material.y * lerp(0.32, 0.54, fresnel);
-    return float4(glass * opacity, opacity);
+    float opacity = Material.y * lerp(0.43, 0.66, fresnel);
+    // Keep the glass colour straight for BlendDescription.AlphaBlend.  This
+    // preserves the bright cyan rim instead of attenuating it twice.
+    return float4(glass, opacity);
 }

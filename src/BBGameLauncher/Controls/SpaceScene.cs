@@ -91,7 +91,7 @@ public sealed class SpaceScene : FrameworkElement
             CubeMotion.Entering => -820 * (1 - eased),
             _ => 0
         };
-        var size = cube.Size * (1 + Math.Sin(_elapsed * .6 + cube.Phase) * .08) * (highlighted ? 1.12 : 1);
+        var size = cube.Size * 1.68 * (1 + Math.Sin(_elapsed * .6 + cube.Phase) * .08) * (highlighted ? 1.12 : 1);
         return (center, size, depth, opacity);
     }
 

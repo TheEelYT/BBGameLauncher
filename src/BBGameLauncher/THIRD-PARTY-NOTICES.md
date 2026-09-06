@@ -1,9 +1,9 @@
 # Third-party notices
 
-`Shaders/CubeLiquidGlass.ps` is adapted from the WPF Liquid Glass Effect project
-by XAML Templates contributors and is used under the MIT License.
+This application uses Vortice.Windows for Direct3D 11 and WPF interop. It is
+used under the MIT License.
 
-Copyright (c) 2026 XAML Templates contributors
+Copyright (c) Amer Koleci and Contributors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy of
 this software and associated documentation files (the "Software"), to deal in

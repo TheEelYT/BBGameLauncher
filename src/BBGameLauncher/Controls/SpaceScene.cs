@@ -1,19 +1,15 @@
 using System.Windows;
 using System.Windows.Media;
-using System.Windows.Media.Imaging;
-using BBGameLauncher.Effects;
 
 namespace BBGameLauncher.Controls;
 
-/// <summary>Procedural starfield with perspective-projected, glass-like menu cubes.</summary>
+/// <summary>Procedural starfield with a Direct3D-backed liquid-glass cube layer.</summary>
 public sealed class SpaceScene : FrameworkElement
 {
-    private const double GlassIor = 1.350;
-    private const double GlassF0 = ((1 - GlassIor) / (1 + GlassIor)) * ((1 - GlassIor) / (1 + GlassIor));
     private readonly List<Star> _stars = [];
     private readonly List<Cube> _cubes = [];
-    private readonly List<CubeLayer> _cubeLayers = [];
-    private readonly VisualCollection _cubeVisuals;
+    private readonly VisualCollection _visuals;
+    private readonly Direct3DGlassCubeSurface _glassSurface;
     private readonly Random _random = new(4821);
     private TimeSpan _lastFrame;
     private double _elapsed;
@@ -24,12 +20,12 @@ public sealed class SpaceScene : FrameworkElement
     private bool _hasPendingCubeSet;
     private CubeMotion _motion;
     private bool _forwardTransition;
-    private RenderTargetBitmap? _backdropSnapshot;
-    private double _lastBackdropSnapshotTime = -1;
 
     public SpaceScene()
     {
-        _cubeVisuals = new VisualCollection(this);
+        _visuals = new VisualCollection(this);
+        _glassSurface = new Direct3DGlassCubeSurface { IsHitTestVisible = false };
+        _visuals.Add(_glassSurface);
         Loaded += (_, _) => CompositionTarget.Rendering += RenderFrame;
         Unloaded += (_, _) => CompositionTarget.Rendering -= RenderFrame;
         ClipToBounds = true;
@@ -42,10 +38,8 @@ public sealed class SpaceScene : FrameworkElement
         var rebuilding = _cubes.Count != menuItemCount;
         var selectionChanged = selectedIndex != _selectedCube;
         _selectedCube = Math.Clamp(selectedIndex, 0, Math.Max(0, menuItemCount - 1));
-        if (rebuilding)
-            RebuildCubes(menuItemCount);
-        if ((selectionChanged || rebuilding) && _cubes.Count > 0)
-            AddFlick(_cubes[_selectedCube]);
+        if (rebuilding) RebuildCubes(menuItemCount);
+        if ((selectionChanged || rebuilding) && _cubes.Count > 0) AddFlick(_cubes[_selectedCube]);
         InvalidateVisual();
     }
 
@@ -59,35 +53,12 @@ public sealed class SpaceScene : FrameworkElement
         _motionElapsed = 0;
     }
 
-    private void RebuildCubes(int menuItemCount)
-    {
-        _cubes.Clear();
-        _cubeLayers.Clear();
-        _cubeVisuals.Clear();
-        var placements = new[]
-        {
-            (.66, .19, 46d), (.85, .36, 36d), (.78, .61, 44d), (.61, .76, 32d),
-            (.90, .72, 54d), (.50, .22, 28d), (.72, .88, 31d)
-        };
-        for (var i = 0; i < menuItemCount; i++)
-        {
-            var p = placements[i % placements.Length];
-            var cube = new Cube(p.Item1, p.Item2, p.Item3, i * .73, .24 + (i % 4) * .05);
-            _cubes.Add(cube);
-            var layer = new CubeLayer(this, cube);
-            _cubeLayers.Add(layer);
-            _cubeVisuals.Add(layer.Refraction);
-            _cubeVisuals.Add(layer.Overlay);
-        }
-    }
-
-    protected override int VisualChildrenCount => _cubeVisuals.Count;
-    protected override Visual GetVisualChild(int index) => _cubeVisuals[index];
+    protected override int VisualChildrenCount => _visuals.Count;
+    protected override Visual GetVisualChild(int index) => _visuals[index];
 
     protected override Size ArrangeOverride(Size finalSize)
     {
-        foreach (CubeLayer layer in _cubeLayers)
-            layer.Arrange(new Rect(finalSize));
+        _glassSurface.Arrange(new Rect(finalSize));
         return finalSize;
     }
 
@@ -107,165 +78,23 @@ public sealed class SpaceScene : FrameworkElement
                 new Point(star.X * RenderSize.Width, star.Y * RenderSize.Height), star.Size, star.Size);
         }
 
-        UpdateBackdropSnapshot();
-        for (var i = 0; i < _cubeLayers.Count; i++)
-            _cubeLayers[i].Update(i == _selectedCube);
+        _glassSurface.SetCubes(_cubes.Select((cube, index) =>
+        {
+            var (center, size, opacity) = GetCubePresentation(cube, index == _selectedCube);
+            return new GlassCubeFrame((float)center.X, (float)center.Y, (float)size,
+                (float)cube.AngleX, (float)cube.AngleY, (float)cube.AngleZ,
+                index == _selectedCube, (float)opacity);
+        }).ToArray());
 
         dc.DrawRectangle(null, new Pen(new SolidColorBrush(Color.FromArgb(42, 101, 168, 240)), 1),
             new Rect(.5, .5, Math.Max(0, RenderSize.Width - 1), Math.Max(0, RenderSize.Height - 1)));
     }
 
-    private void UpdateBackdropSnapshot()
-    {
-        if (RenderSize.Width <= 0 || RenderSize.Height <= 0)
-            return;
-
-        var dpi = VisualTreeHelper.GetDpi(this);
-        var width = Math.Max(1, (int)Math.Ceiling(RenderSize.Width * dpi.DpiScaleX));
-        var height = Math.Max(1, (int)Math.Ceiling(RenderSize.Height * dpi.DpiScaleY));
-        var currentSize = _backdropSnapshot?.PixelWidth == width && _backdropSnapshot.PixelHeight == height;
-        if (currentSize && _elapsed - _lastBackdropSnapshotTime < 1d / 15d)
-            return;
-
-        _backdropSnapshot = new RenderTargetBitmap(width, height, dpi.PixelsPerInchX, dpi.PixelsPerInchY, PixelFormats.Pbgra32);
-        var visual = new DrawingVisual();
-        using (var snapshotContext = visual.RenderOpen())
-        {
-            snapshotContext.DrawRectangle(new LinearGradientBrush(Color.FromRgb(1, 4, 12), Color.FromRgb(2, 8, 19), 90), null, new Rect(RenderSize));
-            DrawNebula(snapshotContext, new Point(RenderSize.Width * .2, RenderSize.Height * .46), RenderSize.Width * .48, Color.FromArgb(113, 67, 69, 195));
-            DrawNebula(snapshotContext, new Point(RenderSize.Width * .79, RenderSize.Height * .23), RenderSize.Width * .36, Color.FromArgb(48, 22, 71, 133));
-            DrawNebula(snapshotContext, new Point(RenderSize.Width * .68, RenderSize.Height * .72), RenderSize.Width * .31, Color.FromArgb(32, 3, 72, 132));
-            foreach (var star in _stars)
-            {
-                var shimmer = .35 + (Math.Sin(_elapsed * star.Twinkle + star.Phase) + 1) * .17;
-                snapshotContext.DrawEllipse(new SolidColorBrush(Color.FromArgb((byte)(255 * shimmer), 140, 204, 255)), null,
-                    new Point(star.X * RenderSize.Width, star.Y * RenderSize.Height), star.Size, star.Size);
-            }
-        }
-        _backdropSnapshot.Render(visual);
-        _lastBackdropSnapshotTime = _elapsed;
-    }
-
-    private void DrawNebula(DrawingContext dc, Point center, double radius, Color color)
-    {
-        var brush = new RadialGradientBrush();
-        brush.GradientStops.Add(new GradientStop(color, 0));
-        brush.GradientStops.Add(new GradientStop(Color.FromArgb((byte)(color.A * .45), color.R, color.G, color.B), .3));
-        brush.GradientStops.Add(new GradientStop(Color.FromArgb(0, color.R, color.G, color.B), 1));
-        dc.DrawEllipse(brush, null, center, radius, radius * .44);
-    }
-
-    private void EnsureStars()
-    {
-        if (_stars.Count != 0) return;
-        for (var i = 0; i < 180; i++)
-            _stars.Add(new Star(_random.NextDouble(), _random.NextDouble(), .35 + _random.NextDouble() * .7,
-                1 + _random.NextDouble() * 3, _random.NextDouble() * Math.PI * 2));
-    }
-
-    private void DrawCube(DrawingContext dc, Cube cube, bool highlighted)
+    private (Point Center, double Size, double Opacity) GetCubePresentation(Cube cube, bool highlighted)
     {
         var transition = Math.Clamp(_motionElapsed / .42, 0, 1);
         var eased = 1 - Math.Pow(1 - transition, 3);
-        var opacity = _motion switch
-        {
-            CubeMotion.Exiting => 1 - eased,
-            CubeMotion.Entering => eased,
-            _ => 1
-        };
-        var bob = Math.Sin(_elapsed * cube.Speed + cube.Phase) * 18;
-        var baseCenter = new Point(cube.X * RenderSize.Width + Math.Cos(_elapsed * cube.Speed + cube.Phase) * 18,
-            cube.Y * RenderSize.Height + bob);
-        var center = baseCenter;
-        var zoom = 1d;
-        if (_motion == CubeMotion.Exiting && _forwardTransition)
-        {
-            zoom = 1 + eased * 7;
-        }
-        else if (_motion == CubeMotion.Exiting)
-        {
-            zoom = 1 - eased * .94;
-        }
-        else if (_motion == CubeMotion.Entering && _forwardTransition)
-        {
-            zoom = .045 + eased * .955;
-        }
-        else if (_motion == CubeMotion.Entering)
-        {
-            zoom = 7 * (1 - eased) + eased;
-        }
-        var size = cube.Size * (1 + Math.Sin(_elapsed * .6 + cube.Phase) * .08) * (highlighted ? 1.12 : 1) * zoom;
-
-        if (highlighted && opacity > 0)
-        {
-            var glow = new RadialGradientBrush();
-            glow.GradientStops.Add(new GradientStop(Color.FromArgb((byte)(opacity * 110), 46, 178, 255), 0));
-            glow.GradientStops.Add(new GradientStop(Color.FromArgb(0, 46, 178, 255), 1));
-            dc.DrawEllipse(glow, null, center, size * 1.9, size * 1.9);
-        }
-
-        var ax = cube.AngleX;
-        var ay = cube.AngleY;
-        var az = cube.AngleZ;
-        var vertices = new[]
-        {
-            new Point3(-1, -1, -1), new Point3(1, -1, -1), new Point3(1, 1, -1), new Point3(-1, 1, -1),
-            new Point3(-1, -1, 1), new Point3(1, -1, 1), new Point3(1, 1, 1), new Point3(-1, 1, 1)
-        }.Select(v => Rotate(v, ax, ay, az)).ToArray();
-        var projected = vertices.Select(v => Project(v, center, size)).ToArray();
-        var faces = new[]
-        {
-            new Face(new[] { 0, 1, 2, 3 }, Color.FromRgb(28, 90, 160)),
-            new Face(new[] { 4, 7, 6, 5 }, Color.FromRgb(75, 194, 255)),
-            new Face(new[] { 0, 4, 5, 1 }, Color.FromRgb(110, 211, 255)),
-            new Face(new[] { 1, 5, 6, 2 }, Color.FromRgb(38, 113, 209)),
-            new Face(new[] { 2, 6, 7, 3 }, Color.FromRgb(51, 145, 234)),
-            new Face(new[] { 3, 7, 4, 0 }, Color.FromRgb(20, 66, 131))
-        };
-
-        var orderedFaces = faces.OrderBy(face => face.Indices.Average(index => vertices[index].Z)).ToArray();
-
-        void DrawGlassFace(Face face, bool refractBackdrop)
-        {
-            var normal = FaceNormal(vertices[face.Indices[0]], vertices[face.Indices[1]], vertices[face.Indices[2]]);
-            var facing = Math.Clamp(Math.Abs(normal.Z), 0, 1);
-            var fresnel = GlassF0 + (1 - GlassF0) * Math.Pow(1 - facing, 5);
-            var transmission = 1 - fresnel;
-            var alpha = (byte)(opacity * (highlighted ? 72 + fresnel * 82 : 43 + fresnel * 68));
-            var clearWhite = Color.FromRgb(228, 243, 255);
-            var tint = highlighted
-                ? Blend(clearWhite, Color.FromRgb(118, 219, 255), .24 + transmission * .22)
-                : Blend(face.Tint, clearWhite, .91);
-            var facePoints = face.Indices.Select(index => projected[index]).ToArray();
-            if (refractBackdrop)
-            {
-                var refractedBackdrop = RefractedBackdropBrush(normal, highlighted, opacity, fresnel);
-                if (refractedBackdrop != null)
-                    dc.DrawGeometry(refractedBackdrop, null, Polygon(facePoints));
-            }
-
-            var fill = GlassFaceBrush(tint, alpha, fresnel);
-            dc.DrawGeometry(fill, null, Polygon(facePoints));
-        }
-
-        // Keep one depth-sorted pass. Splitting faces into back/front buckets
-        // caused the visible popping whenever a rotating face crossed the
-        // bucket boundary.
-        foreach (var face in orderedFaces)
-        {
-            var normal = FaceNormal(vertices[face.Indices[0]], vertices[face.Indices[1]], vertices[face.Indices[2]]);
-            DrawGlassFace(face, refractBackdrop: normal.Z < 0);
-        }
-
-        // This stays after the stable surface pass until the cube renderer is
-        // replaced by the per-pixel environment-map pass.
-        DrawInternalGlow(dc, center, size, opacity, highlighted);
-    }
-
-    private (Point Center, double Size) GetCubeLayout(Cube cube, bool highlighted)
-    {
-        var transition = Math.Clamp(_motionElapsed / .42, 0, 1);
-        var eased = 1 - Math.Pow(1 - transition, 3);
+        var opacity = _motion switch { CubeMotion.Exiting => 1 - eased, CubeMotion.Entering => eased, _ => 1 };
         var bob = Math.Sin(_elapsed * cube.Speed + cube.Phase) * 18;
         var center = new Point(cube.X * RenderSize.Width + Math.Cos(_elapsed * cube.Speed + cube.Phase) * 18,
             cube.Y * RenderSize.Height + bob);
@@ -278,64 +107,36 @@ public sealed class SpaceScene : FrameworkElement
             _ => 1
         };
         var size = cube.Size * (1 + Math.Sin(_elapsed * .6 + cube.Phase) * .08) * (highlighted ? 1.12 : 1) * zoom;
-        return (center, size);
+        return (center, Math.Max(0, size), opacity);
     }
 
-    private Geometry GetCubeSilhouette(Cube cube, bool highlighted)
+    private void RebuildCubes(int menuItemCount)
     {
-        var (center, size) = GetCubeLayout(cube, highlighted);
-        var points = new[]
+        _cubes.Clear();
+        var placements = new[] { (.66, .19, 46d), (.85, .36, 36d), (.78, .61, 44d), (.61, .76, 32d), (.90, .72, 54d), (.50, .22, 28d), (.72, .88, 31d) };
+        for (var i = 0; i < menuItemCount; i++)
         {
-            new Point3(-1, -1, -1), new Point3(1, -1, -1), new Point3(1, 1, -1), new Point3(-1, 1, -1),
-            new Point3(-1, -1, 1), new Point3(1, -1, 1), new Point3(1, 1, 1), new Point3(-1, 1, 1)
-        }.Select(v => Project(Rotate(v, cube.AngleX, cube.AngleY, cube.AngleZ), center, size)).ToList();
-
-        // The cube's projected outer hull is exactly the region that should
-        // refract the starfield. Internal face borders are painted above it.
-        var hull = points.OrderBy(p => p.X).ThenBy(p => p.Y).Aggregate(new List<Point>(), (half, point) =>
-        {
-            while (half.Count >= 2 && Cross(half[^2], half[^1], point) <= 0) half.RemoveAt(half.Count - 1);
-            half.Add(point);
-            return half;
-        });
-        var upper = points.OrderByDescending(p => p.X).ThenByDescending(p => p.Y).Aggregate(new List<Point>(), (half, point) =>
-        {
-            while (half.Count >= 2 && Cross(half[^2], half[^1], point) <= 0) half.RemoveAt(half.Count - 1);
-            half.Add(point);
-            return half;
-        });
-        hull.RemoveAt(hull.Count - 1);
-        upper.RemoveAt(upper.Count - 1);
-        hull.AddRange(upper);
-        return Polygon(hull.ToArray());
+            var p = placements[i % placements.Length];
+            _cubes.Add(new Cube(p.Item1, p.Item2, p.Item3, i * .73, .24 + (i % 4) * .05));
+        }
     }
 
-    private static double Cross(Point origin, Point a, Point b) =>
-        (a.X - origin.X) * (b.Y - origin.Y) - (a.Y - origin.Y) * (b.X - origin.X);
-
-    private static Point3 Rotate(Point3 p, double xAngle, double yAngle, double zAngle)
+    private static void DrawNebula(DrawingContext dc, Point center, double radius, Color color)
     {
-        var x = p.X * Math.Cos(yAngle) + p.Z * Math.Sin(yAngle);
-        var z = -p.X * Math.Sin(yAngle) + p.Z * Math.Cos(yAngle);
-        var y = p.Y * Math.Cos(xAngle) - z * Math.Sin(xAngle);
-        z = p.Y * Math.Sin(xAngle) + z * Math.Cos(xAngle);
-        var finalX = x * Math.Cos(zAngle) - y * Math.Sin(zAngle);
-        var finalY = x * Math.Sin(zAngle) + y * Math.Cos(zAngle);
-        return new Point3(finalX, finalY, z);
+        var brush = new RadialGradientBrush();
+        brush.GradientStops.Add(new GradientStop(color, 0));
+        brush.GradientStops.Add(new GradientStop(Color.FromArgb((byte)(color.A * .45), color.R, color.G, color.B), .3));
+        brush.GradientStops.Add(new GradientStop(Color.FromArgb(0, color.R, color.G, color.B), 1));
+        dc.DrawEllipse(brush, null, center, radius, radius * .44);
     }
 
-    private static Point Project(Point3 p, Point center, double size)
+    private void EnsureStars()
     {
-        var perspective = size * 2.1 / (4.3 - p.Z);
-        return new Point(center.X + p.X * perspective, center.Y + p.Y * perspective);
+        if (_stars.Count != 0) return;
+        for (var i = 0; i < 180; i++) _stars.Add(new Star(_random.NextDouble(), _random.NextDouble(), .35 + _random.NextDouble() * .7, 1 + _random.NextDouble() * 3, _random.NextDouble() * Math.PI * 2));
     }
 
-    private static void AddFlick(Cube cube)
-    {
-        cube.SpinX += 2.4;
-        cube.SpinY += 4.6;
-        cube.SpinZ += .85;
-    }
+    private static void AddFlick(Cube cube) { cube.SpinX += 2.4; cube.SpinY += 4.6; cube.SpinZ += .85; }
 
     private static void UpdateCubeRotations(IEnumerable<Cube> cubes, double delta)
     {
@@ -345,88 +146,8 @@ public sealed class SpaceScene : FrameworkElement
             cube.AngleX += (.075 + cube.Speed * .045 + cube.SpinX) * delta;
             cube.AngleY += (.052 + cube.Speed * .035 + cube.SpinY) * delta;
             cube.AngleZ += (.014 + cube.Speed * .012 + cube.SpinZ) * delta;
-            cube.SpinX *= damping;
-            cube.SpinY *= damping;
-            cube.SpinZ *= damping;
+            cube.SpinX *= damping; cube.SpinY *= damping; cube.SpinZ *= damping;
         }
-    }
-
-    private static Point3 FaceNormal(Point3 a, Point3 b, Point3 c)
-    {
-        var u = new Point3(b.X - a.X, b.Y - a.Y, b.Z - a.Z);
-        var v = new Point3(c.X - a.X, c.Y - a.Y, c.Z - a.Z);
-        var normal = new Point3(u.Y * v.Z - u.Z * v.Y, u.Z * v.X - u.X * v.Z, u.X * v.Y - u.Y * v.X);
-        var length = Math.Sqrt(normal.X * normal.X + normal.Y * normal.Y + normal.Z * normal.Z);
-        return length == 0 ? normal : new Point3(normal.X / length, normal.Y / length, normal.Z / length);
-    }
-
-    private static Color Blend(Color from, Color to, double amount) => Color.FromRgb(
-        (byte)(from.R + (to.R - from.R) * amount),
-        (byte)(from.G + (to.G - from.G) * amount),
-        (byte)(from.B + (to.B - from.B) * amount));
-
-    private ImageBrush? RefractedBackdropBrush(Point3 normal, bool highlighted, double opacity, double fresnel)
-    {
-        if (_backdropSnapshot == null || RenderSize.Width <= 0 || RenderSize.Height <= 0)
-            return null;
-
-        // Each face looks through the starfield from a slightly different
-        // direction. The offset is deliberately face-normal based, rather than
-        // a whole-cube blur, so the cube has visible optical depth.
-        var shift = (highlighted ? 13 : 9) * (1 - fresnel * .42);
-        return new ImageBrush(_backdropSnapshot)
-        {
-            ViewboxUnits = BrushMappingMode.Absolute,
-            ViewportUnits = BrushMappingMode.Absolute,
-            Viewbox = new Rect(normal.X * shift, normal.Y * shift, RenderSize.Width, RenderSize.Height),
-            Viewport = new Rect(0, 0, RenderSize.Width, RenderSize.Height),
-            Stretch = Stretch.Fill,
-            Opacity = opacity * (highlighted ? .72 : .58)
-        };
-    }
-
-    private static void DrawInternalGlow(DrawingContext dc, Point center, double size, double opacity, bool highlighted)
-    {
-        if (!highlighted)
-            return;
-
-        var core = new RadialGradientBrush();
-        var glowAlpha = 158;
-        core.GradientStops.Add(new GradientStop(Color.FromArgb((byte)(opacity * glowAlpha), 52, 188, 255), 0));
-        core.GradientStops.Add(new GradientStop(Color.FromArgb((byte)(opacity * glowAlpha * .38), 95, 206, 255), .36));
-        core.GradientStops.Add(new GradientStop(Color.FromArgb(0, 95, 206, 255), 1));
-        dc.DrawEllipse(core, null, center, size * .56, size * .56);
-    }
-
-    private static LinearGradientBrush GlassFaceBrush(Color tint, byte alpha, double fresnel)
-    {
-        static byte Scale(byte value, double amount) => (byte)Math.Clamp(value * amount, 0, 255);
-
-        var highlight = Color.FromArgb(Scale(alpha, .52 + fresnel * .24), 255, 255, 255);
-        var body = Color.FromArgb(Scale(alpha, .70), tint.R, tint.G, tint.B);
-        var clearCore = Color.FromArgb(Scale(alpha, .28), tint.R, tint.G, tint.B);
-        var returnReflection = Color.FromArgb(Scale(alpha, .42 + fresnel * .22), tint.R, tint.G, tint.B);
-        var brush = new LinearGradientBrush
-        {
-            StartPoint = new Point(0, 0),
-            EndPoint = new Point(1, 1)
-        };
-        brush.GradientStops.Add(new GradientStop(highlight, 0));
-        brush.GradientStops.Add(new GradientStop(body, .24));
-        brush.GradientStops.Add(new GradientStop(clearCore, .58));
-        brush.GradientStops.Add(new GradientStop(returnReflection, 1));
-        brush.Freeze();
-        return brush;
-    }
-
-    private static StreamGeometry Polygon(params Point[] points)
-    {
-        var geometry = new StreamGeometry();
-        using var context = geometry.Open();
-        context.BeginFigure(points[0], true, true);
-        context.PolyLineTo(points.Skip(1).ToArray(), true, true);
-        geometry.Freeze();
-        return geometry;
     }
 
     private void RenderFrame(object? sender, EventArgs e)
@@ -445,18 +166,13 @@ public sealed class SpaceScene : FrameworkElement
                     {
                         if (_hasPendingCubeSet)
                         {
-                            _selectedCube = _pendingSelectedCube;
-                            RebuildCubes(_pendingCubeCount);
+                            _selectedCube = _pendingSelectedCube; RebuildCubes(_pendingCubeCount);
                             if (_cubes.Count > 0) AddFlick(_cubes[_selectedCube]);
                             _hasPendingCubeSet = false;
                         }
-                        _motion = CubeMotion.Entering;
-                        _motionElapsed = 0;
+                        _motion = CubeMotion.Entering; _motionElapsed = 0;
                     }
-                    else if (_motionElapsed >= .42)
-                    {
-                        _motion = CubeMotion.None;
-                    }
+                    else if (_motionElapsed >= .42) _motion = CubeMotion.None;
                 }
             }
             _lastFrame = args.RenderingTime;
@@ -465,105 +181,13 @@ public sealed class SpaceScene : FrameworkElement
     }
 
     private sealed record Star(double X, double Y, double Size, double Twinkle, double Phase);
-
-    private sealed class CubeLayer
-    {
-        public CubeLayer(SpaceScene scene, Cube cube)
-        {
-            Refraction = new CubeRefractionVisual(scene, cube);
-            Overlay = new CubeOverlayVisual(scene, cube);
-        }
-
-        public CubeRefractionVisual Refraction { get; }
-        public CubeOverlayVisual Overlay { get; }
-
-        public void Arrange(Rect bounds)
-        {
-            Refraction.Arrange(bounds);
-            Overlay.Arrange(bounds);
-        }
-
-        public void Update(bool highlighted)
-        {
-            Refraction.Update(highlighted);
-            Overlay.Highlighted = highlighted;
-            Overlay.InvalidateVisual();
-        }
-    }
-
-    private sealed class CubeRefractionVisual : FrameworkElement
-    {
-        private readonly SpaceScene _scene;
-        private readonly Cube _cube;
-        private readonly CubeLiquidGlassEffect _glass = new();
-
-        public CubeRefractionVisual(SpaceScene scene, Cube cube)
-        {
-            _scene = scene;
-            _cube = cube;
-            IsHitTestVisible = false;
-            Effect = _glass;
-        }
-
-        public void Update(bool highlighted)
-        {
-            var (center, size) = _scene.GetCubeLayout(_cube, highlighted);
-            Clip = _scene.GetCubeSilhouette(_cube, highlighted);
-            _glass.TextureSize = new Point(Math.Max(1, ActualWidth), Math.Max(1, ActualHeight));
-            _glass.GlassCenter = center;
-            _glass.GlassSize = new Point(Math.Max(1, size * 2.3), Math.Max(1, size * 2.3));
-            _glass.BlurIntensity = highlighted ? 2.0f : 1.45f;
-            InvalidateVisual();
-        }
-
-        protected override void OnRender(DrawingContext drawingContext)
-        {
-            if (_scene._backdropSnapshot != null)
-                drawingContext.DrawImage(_scene._backdropSnapshot, new Rect(RenderSize));
-        }
-    }
-
-    private sealed class CubeOverlayVisual : FrameworkElement
-    {
-        private readonly SpaceScene _scene;
-        private readonly Cube _cube;
-
-        public CubeOverlayVisual(SpaceScene scene, Cube cube)
-        {
-            _scene = scene;
-            _cube = cube;
-            IsHitTestVisible = false;
-        }
-
-        public bool Highlighted { get; set; }
-
-        protected override void OnRender(DrawingContext drawingContext) =>
-            _scene.DrawCube(drawingContext, _cube, Highlighted);
-    }
-
     private sealed class Cube
     {
         public Cube(double x, double y, double size, double phase, double speed)
-        {
-            X = x; Y = y; Size = size; Phase = phase; Speed = speed;
-            AngleX = phase * .8;
-            AngleY = phase * 1.7;
-            AngleZ = phase * .25;
-        }
-
-        public double X { get; }
-        public double Y { get; }
-        public double Size { get; }
-        public double Phase { get; }
-        public double Speed { get; }
-        public double AngleX { get; set; }
-        public double AngleY { get; set; }
-        public double AngleZ { get; set; }
-        public double SpinX { get; set; }
-        public double SpinY { get; set; }
-        public double SpinZ { get; set; }
+        { X = x; Y = y; Size = size; Phase = phase; Speed = speed; AngleX = phase * .8; AngleY = phase * 1.7; AngleZ = phase * .25; }
+        public double X { get; } public double Y { get; } public double Size { get; } public double Phase { get; } public double Speed { get; }
+        public double AngleX { get; set; } public double AngleY { get; set; } public double AngleZ { get; set; }
+        public double SpinX { get; set; } public double SpinY { get; set; } public double SpinZ { get; set; }
     }
-    private sealed record Face(int[] Indices, Color Tint);
-    private readonly record struct Point3(double X, double Y, double Z);
     private enum CubeMotion { None, Exiting, Entering }
 }

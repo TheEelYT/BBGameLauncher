@@ -1,0 +1,188 @@
+using System.Numerics;
+using System.Runtime.InteropServices;
+using Vortice.D3DCompiler;
+using Vortice.Direct3D;
+using Vortice.Direct3D11;
+using Vortice.DXGI;
+using Vortice.Mathematics;
+using Vortice.Wpf;
+
+namespace BBGameLauncher.Controls;
+
+/// <summary>
+/// Hardware cube renderer. Unlike a WPF bitmap effect, this samples a texture
+/// cube with reflected and refracted ray directions for every rendered pixel.
+/// </summary>
+public sealed class Direct3DGlassCubeSurface : DrawingSurface
+{
+    private GlassCubeFrame[] _cubes = [];
+    private ID3D11Buffer? _vertices;
+    private ID3D11Buffer? _frameConstants;
+    private ID3D11Buffer? _objectConstants;
+    private ID3D11VertexShader? _vertexShader;
+    private ID3D11PixelShader? _pixelShader;
+    private ID3D11InputLayout? _inputLayout;
+    private ID3D11Texture2D? _environment;
+    private ID3D11ShaderResourceView? _environmentView;
+    private ID3D11SamplerState? _environmentSampler;
+    private ID3D11BlendState? _glassBlend;
+    private ID3D11RasterizerState? _rasterizer;
+
+    public Direct3DGlassCubeSurface()
+    {
+        AlwaysRefresh = true;
+        LoadContent += OnLoadContent;
+        Draw += OnDraw;
+        UnloadContent += OnUnloadContent;
+    }
+
+    public void SetCubes(GlassCubeFrame[] cubes)
+    {
+        _cubes = cubes;
+        Invalidate();
+    }
+
+    private void OnLoadContent(object? sender, DrawingSurfaceEventArgs e)
+    {
+        var vertices = CreateCubeVertices();
+        _vertices = e.Device.CreateBuffer(vertices, BindFlags.VertexBuffer);
+        _frameConstants = e.Device.CreateBuffer(new BufferDescription((uint)Marshal.SizeOf<FrameConstants>(), BindFlags.ConstantBuffer));
+        _objectConstants = e.Device.CreateBuffer(new BufferDescription((uint)Marshal.SizeOf<ObjectConstants>(), BindFlags.ConstantBuffer));
+
+        var shaderPath = Path.Combine(AppContext.BaseDirectory, "Shaders", "GlassCube.hlsl");
+        var shaderSource = File.ReadAllText(shaderPath);
+        var vertexBytecode = Compiler.Compile(shaderSource, "VSMain", shaderPath, "vs_4_0");
+        var pixelBytecode = Compiler.Compile(shaderSource, "PSMain", shaderPath, "ps_4_0");
+        _vertexShader = e.Device.CreateVertexShader(vertexBytecode.Span);
+        _pixelShader = e.Device.CreatePixelShader(pixelBytecode.Span);
+        _inputLayout = e.Device.CreateInputLayout(
+        [
+            new InputElementDescription("POSITION", 0, Format.R32G32B32_Float, 0, 0),
+            new InputElementDescription("NORMAL", 0, Format.R32G32B32_Float, 12, 0)
+        ], vertexBytecode.Span);
+
+        _environment = CreateEnvironmentMap(e.Device, e.Context);
+        _environmentView = e.Device.CreateShaderResourceView(_environment);
+        _environmentSampler = e.Device.CreateSamplerState(SamplerDescription.LinearClamp);
+        _glassBlend = e.Device.CreateBlendState(BlendDescription.AlphaBlend);
+        _rasterizer = e.Device.CreateRasterizerState(RasterizerDescription.CullNone);
+    }
+
+    private void OnDraw(object? sender, DrawEventArgs e)
+    {
+        e.Context.ClearRenderTargetView(e.Surface.ColorTextureView!, new Color4(0, 0, 0, 0));
+        if (e.Surface.DepthStencilView != null)
+            e.Context.ClearDepthStencilView(e.Surface.DepthStencilView, DepthStencilClearFlags.Depth, 1, 0);
+        if (_vertices == null || _frameConstants == null || _objectConstants == null || _environmentView == null ||
+            _environmentSampler == null || _vertexShader == null || _pixelShader == null || _inputLayout == null)
+            return;
+
+        var width = Math.Max(1, e.Surface.TextureWidth);
+        var height = Math.Max(1, e.Surface.TextureHeight);
+        const float fieldOfView = MathF.PI / 4f;
+        var cameraDistance = height / (2f * MathF.Tan(fieldOfView / 2f));
+        var camera = new Vector3(0, 0, -cameraDistance);
+        var view = Matrix4x4.CreateLookAt(camera, Vector3.Zero, Vector3.UnitY);
+        var projection = Matrix4x4.CreatePerspectiveFieldOfView(fieldOfView, width / (float)height, 1f, 8000f);
+        e.Context.UpdateSubresource(new FrameConstants { ViewProjection = view * projection, Camera = new Vector4(camera, 0) }, _frameConstants);
+
+        e.Context.OMSetBlendState(_glassBlend);
+        e.Context.OMSetDepthStencilState(null);
+        e.Context.RSSetState(_rasterizer);
+        e.Context.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
+        e.Context.IASetInputLayout(_inputLayout);
+        e.Context.IASetVertexBuffer(0, _vertices, Marshal.SizeOf<CubeVertex>());
+        e.Context.VSSetShader(_vertexShader);
+        e.Context.PSSetShader(_pixelShader);
+        e.Context.VSSetConstantBuffer(0, _frameConstants);
+        e.Context.VSSetConstantBuffer(1, _objectConstants);
+        e.Context.PSSetConstantBuffer(1, _objectConstants);
+        e.Context.PSSetShaderResource(0, _environmentView);
+        e.Context.PSSetSampler(0, _environmentSampler);
+
+        // Keeping one stable, frame-level order avoids the face-bucket pop the
+        // old WPF implementation exhibited when rotating through a face plane.
+        foreach (var cube in _cubes.OrderByDescending(cube => cube.Size))
+        {
+            if (cube.Size <= .01f || cube.Opacity <= .001f) continue;
+            var position = new Vector3(cube.X - width * .5f, height * .5f - cube.Y, 0);
+            var rotation = Matrix4x4.CreateRotationX(cube.AngleX) * Matrix4x4.CreateRotationY(cube.AngleY) * Matrix4x4.CreateRotationZ(cube.AngleZ);
+            var world = Matrix4x4.CreateScale(cube.Size) * rotation * Matrix4x4.CreateTranslation(position);
+            e.Context.UpdateSubresource(new ObjectConstants
+            {
+                World = world,
+                Material = new Vector4(cube.Selected ? 1 : 0, cube.Opacity, cube.Size, 0)
+            }, _objectConstants);
+            e.Context.Draw(36, 0);
+        }
+    }
+
+    private void OnUnloadContent(object? sender, DrawingSurfaceEventArgs e)
+    {
+        _vertices?.Dispose(); _vertices = null;
+        _frameConstants?.Dispose(); _frameConstants = null;
+        _objectConstants?.Dispose(); _objectConstants = null;
+        _vertexShader?.Dispose(); _vertexShader = null;
+        _pixelShader?.Dispose(); _pixelShader = null;
+        _inputLayout?.Dispose(); _inputLayout = null;
+        _environmentSampler?.Dispose(); _environmentSampler = null;
+        _environmentView?.Dispose(); _environmentView = null;
+        _environment?.Dispose(); _environment = null;
+        _glassBlend?.Dispose(); _glassBlend = null;
+        _rasterizer?.Dispose(); _rasterizer = null;
+    }
+
+    private static ID3D11Texture2D CreateEnvironmentMap(ID3D11Device device, ID3D11DeviceContext context)
+    {
+        const int size = 128;
+        var texture = device.CreateTexture2D(new Texture2DDescription
+        {
+            Width = size, Height = size, ArraySize = 6, MipLevels = 1,
+            Format = Format.B8G8R8A8_UNorm, BindFlags = BindFlags.ShaderResource,
+            Usage = ResourceUsage.Default, CPUAccessFlags = CpuAccessFlags.None,
+            MiscFlags = ResourceOptionFlags.TextureCube, SampleDescription = new SampleDescription(1, 0)
+        });
+        for (var face = 0; face < 6; face++)
+        {
+            var pixels = new uint[size * size];
+            var random = new Random(9601 + face * 37);
+            for (var y = 0; y < size; y++)
+            for (var x = 0; x < size; x++)
+            {
+                var u = x / (float)(size - 1) * 2 - 1;
+                var v = y / (float)(size - 1) * 2 - 1;
+                var bloom = MathF.Exp(-((u - (face == 2 ? -.35f : .45f)) * (u - (face == 2 ? -.35f : .45f)) + (v + .16f) * (v + .16f)) * 2.5f);
+                var star = random.NextDouble() > .992 ? 1f : 0f;
+                var red = (byte)Math.Clamp(3 + bloom * 23 + star * 126, 0, 255);
+                var green = (byte)Math.Clamp(9 + bloom * 64 + star * 162, 0, 255);
+                var blue = (byte)Math.Clamp(24 + bloom * 118 + star * 190, 0, 255);
+                pixels[y * size + x] = 0xff000000u | ((uint)red << 16) | ((uint)green << 8) | blue;
+            }
+            context.UpdateSubresource(pixels, texture, (uint)face, size * sizeof(uint));
+        }
+        return texture;
+    }
+
+    private static CubeVertex[] CreateCubeVertices()
+    {
+        var p = new[]
+        {
+            new Vector3(-1,-1,-1), new Vector3(1,-1,-1), new Vector3(1,1,-1), new Vector3(-1,1,-1),
+            new Vector3(-1,-1,1), new Vector3(1,-1,1), new Vector3(1,1,1), new Vector3(-1,1,1)
+        };
+        var faces = new[]
+        {
+            (new[] { 0, 1, 2, 3 }, new Vector3(0,0,-1)), (new[] { 5, 4, 7, 6 }, new Vector3(0,0,1)),
+            (new[] { 4, 0, 3, 7 }, new Vector3(-1,0,0)), (new[] { 1, 5, 6, 2 }, new Vector3(1,0,0)),
+            (new[] { 3, 2, 6, 7 }, new Vector3(0,1,0)), (new[] { 4, 5, 1, 0 }, new Vector3(0,-1,0))
+        };
+        return faces.SelectMany(face => new[] { face.Item1[0], face.Item1[1], face.Item1[2], face.Item1[0], face.Item1[2], face.Item1[3] }
+            .Select(index => new CubeVertex { Position = p[index], Normal = face.Item2 })).ToArray();
+    }
+
+    [StructLayout(LayoutKind.Sequential)] private struct CubeVertex { public Vector3 Position; public Vector3 Normal; }
+    [StructLayout(LayoutKind.Sequential)] private struct FrameConstants { public Matrix4x4 ViewProjection; public Vector4 Camera; }
+    [StructLayout(LayoutKind.Sequential)] private struct ObjectConstants { public Matrix4x4 World; public Vector4 Material; }
+}
+
+public readonly record struct GlassCubeFrame(float X, float Y, float Size, float AngleX, float AngleY, float AngleZ, bool Selected, float Opacity);

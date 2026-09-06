@@ -95,7 +95,7 @@ public partial class MainWindow : Window
 
     private void SetSelectedIndex(int index)
     {
-        if (index < 0 || index >= _activeItems.Count || index == _selectedIndex)
+        if (_isMenuTransition || index < 0 || index >= _activeItems.Count || index == _selectedIndex)
             return;
 
         _selectedIndex = index;
@@ -120,8 +120,6 @@ public partial class MainWindow : Window
         }
 
         Scene.SetMenuCubes(_activeItems.Count, _selectedIndex);
-        if (_activeItems.Count > 0)
-            ToolTip = _activeItems[_selectedIndex].Description;
     }
 
     private void ActivateSelected()

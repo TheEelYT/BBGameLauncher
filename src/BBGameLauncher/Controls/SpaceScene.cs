@@ -387,12 +387,15 @@ public sealed class SpaceScene : FrameworkElement
 
     private static void DrawInternalGlow(DrawingContext dc, Point center, double size, double opacity, bool highlighted)
     {
+        if (!highlighted)
+            return;
+
         var core = new RadialGradientBrush();
-        var glowAlpha = highlighted ? 158 : 66;
+        var glowAlpha = 158;
         core.GradientStops.Add(new GradientStop(Color.FromArgb((byte)(opacity * glowAlpha), 52, 188, 255), 0));
         core.GradientStops.Add(new GradientStop(Color.FromArgb((byte)(opacity * glowAlpha * .38), 95, 206, 255), .36));
         core.GradientStops.Add(new GradientStop(Color.FromArgb(0, 95, 206, 255), 1));
-        dc.DrawEllipse(core, null, center, size * (highlighted ? .56 : .42), size * (highlighted ? .56 : .42));
+        dc.DrawEllipse(core, null, center, size * .56, size * .56);
     }
 
     private static LinearGradientBrush GlassFaceBrush(Color tint, byte alpha, double fresnel)

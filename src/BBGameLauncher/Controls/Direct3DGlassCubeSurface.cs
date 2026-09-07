@@ -184,8 +184,10 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
         if (e.Surface.DepthStencilView != null)
             e.Context.ClearDepthStencilView(e.Surface.DepthStencilView, DepthStencilClearFlags.Depth, 1, 0);
 
+        // Transparent cube faces must not occlude one another through depth
+        // writes. Render all six surfaces in their stable mesh order instead.
+        e.Context.OMSetRenderTargets(e.Surface.ColorTextureView!, null);
         e.Context.OMSetBlendState(_glassBlend);
-        e.Context.OMSetDepthStencilState(null);
         e.Context.RSSetState(_rasterizer);
         e.Context.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
         e.Context.IASetInputLayout(_inputLayout);
@@ -216,17 +218,6 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
             var rotation = Matrix4x4.CreateRotationX(cube.AngleX) * Matrix4x4.CreateRotationY(cube.AngleY) * Matrix4x4.CreateRotationZ(cube.AngleZ);
             var world = Matrix4x4.CreateScale(cube.Size) * rotation * Matrix4x4.CreateTranslation(position);
             Matrix4x4.Invert(world, out var inverseWorld);
-
-            // Draw the physical rear surfaces first. The front pass blends over
-            // them, so the complete transparent cube remains visible throughout
-            // rotation instead of switching between three camera-facing panels.
-            e.Context.UpdateSubresource(new ObjectConstants
-            {
-                World = world,
-                InverseWorld = inverseWorld,
-                Material = new Vector4(cube.Selected ? 1 : 0, cube.Opacity, cube.Size, 1)
-            }, _objectConstants);
-            e.Context.Draw((uint)_cubeVertexCount, 0);
 
             e.Context.UpdateSubresource(new ObjectConstants
             {

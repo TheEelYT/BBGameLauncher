@@ -9,7 +9,7 @@ cbuffer Object : register(b1)
 {
     row_major float4x4 World;
     row_major float4x4 InverseWorld;
-    float4 Material; // selected, opacity, cube size, rear-surface pass
+    float4 Material; // selected, opacity, cube size, unused
 };
 
 TextureCube EnvironmentMap : register(t0);
@@ -188,13 +188,15 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 incident = normalize(input.WorldPosition - Camera.xyz);
     float3 entryNormal = normalize(input.WorldNormal);
     float signedFacing = dot(entryNormal, -incident);
+    float3 surfaceReflection = EnvironmentMap.Sample(EnvironmentSampler, reflect(incident, entryNormal)).rgb;
+    float3 grazingGlass = surfaceReflection * 1.18 + float3(0.12, 0.38, 0.76);
+    float grazingOpacity = Material.y * 0.58;
 
-    // Rear surfaces are deliberately retained. They are rendered before the
-    // front volume pass, allowing their refraction and Fresnel response to be
-    // seen through the near glass for the entire rotation.
-    if (Material.w > 0.5)
+    // Every rear surface remains in the same draw as every front surface. Both
+    // sides converge on the same grazing response before the normal crosses
+    // 90 degrees, eliminating the old front/rear-pass brightness snap.
+    if (signedFacing <= 0.0)
     {
-        if (signedFacing >= 0.0) discard;
         float rearFacing = saturate(-signedFacing);
         float rearFresnel = 0.035 + 0.965 * pow(1.0 - rearFacing, 5.0);
         float rearEdge = SurfaceEdgeFactor(input.LocalPosition);
@@ -207,10 +209,11 @@ float4 PSMain(PSInput input) : SV_TARGET
         rearGlass += rearFresnel * float3(0.10, 0.34, 0.68);
         rearGlass += rearEdge * float3(0.035, 0.14, 0.28);
         float rearOpacity = Material.y * (0.18 + rearFresnel * 0.23 + rearEdge * 0.08);
+        float rearTransition = smoothstep(0.0, 0.20, -signedFacing);
+        rearGlass = lerp(grazingGlass, rearGlass, rearTransition);
+        rearOpacity = lerp(grazingOpacity, rearOpacity, rearTransition);
         return float4(rearGlass, rearOpacity);
     }
-
-    if (signedFacing <= 0.0) discard;
 
     float3 glassDirection = refract(incident, entryNormal, 1.0 / glassIor);
     float3 localDirection = normalize(mul(float4(glassDirection, 0), InverseWorld).xyz);
@@ -246,8 +249,6 @@ float4 PSMain(PSInput input) : SV_TARGET
         reflect(bounceWorldDirection, bounceWorldNormal)).rgb;
     bouncedScene = lerp(bounceEnvironment, bouncedScene, bounceTransmission);
 
-    float3 reflectedDirection = reflect(incident, entryNormal);
-    float3 reflection = EnvironmentMap.Sample(EnvironmentSampler, reflectedDirection).rgb;
     float facing = saturate(dot(-incident, entryNormal));
     float fresnel = 0.035 + 0.965 * pow(1.0 - facing, 5.0);
     float exitFacing = saturate(dot(glassDirection, exitNormal));
@@ -259,7 +260,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 transmission = lerp(primaryScene, bouncedScene, bounceWeight);
 
     float3 glass = transmission * absorption * float3(0.90, 0.98, 1.07);
-    glass = lerp(glass, reflection * 1.15, fresnel);
+    glass = lerp(glass, surfaceReflection * 1.15, fresnel);
     glass += fresnel * float3(0.20, 0.48, 0.82);
 
     // Broad edge caustics reveal both the entry surface and the refracted rear
@@ -278,5 +279,8 @@ float4 PSMain(PSInput input) : SV_TARGET
     glass += coreGlow * float3(0.015, 0.34, 1.25);
 
     float opacity = Material.y * (0.23 + fresnel * 0.38 + thickness * 0.10 + exitFresnel * 0.08);
+    float frontTransition = smoothstep(0.0, 0.20, signedFacing);
+    glass = lerp(grazingGlass, glass, frontTransition);
+    opacity = lerp(grazingOpacity, opacity, frontTransition);
     return float4(glass, opacity);
 }

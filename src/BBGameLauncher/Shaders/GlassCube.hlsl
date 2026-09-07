@@ -187,33 +187,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     const float glassIor = 1.50;
     float3 incident = normalize(input.WorldPosition - Camera.xyz);
     float3 entryNormal = normalize(input.WorldNormal);
-    float signedFacing = dot(entryNormal, -incident);
     float3 surfaceReflection = EnvironmentMap.Sample(EnvironmentSampler, reflect(incident, entryNormal)).rgb;
-    float3 grazingGlass = surfaceReflection * 1.18 + float3(0.12, 0.38, 0.76);
-    float grazingOpacity = Material.y * 0.58;
-
-    // Every rear surface remains in the same draw as every front surface. Both
-    // sides converge on the same grazing response before the normal crosses
-    // 90 degrees, eliminating the old front/rear-pass brightness snap.
-    if (signedFacing <= 0.0)
-    {
-        float rearFacing = saturate(-signedFacing);
-        float rearFresnel = 0.035 + 0.965 * pow(1.0 - rearFacing, 5.0);
-        float rearEdge = SurfaceEdgeFactor(input.LocalPosition);
-        float2 screenUv = input.Position.xy * Viewport.zw;
-        float2 rearOffset = entryNormal.xy * (0.004 + rearFresnel * 0.008);
-        float3 rearTransmission = SceneBackdrop.Sample(SceneSampler, saturate(screenUv + rearOffset)).rgb;
-        float3 rearReflection = EnvironmentMap.Sample(EnvironmentSampler, reflect(incident, entryNormal)).rgb;
-        float3 rearGlass = lerp(rearTransmission * float3(0.76, 0.90, 1.08),
-            rearReflection * 1.10, 0.16 + rearFresnel * 0.46);
-        rearGlass += rearFresnel * float3(0.10, 0.34, 0.68);
-        rearGlass += rearEdge * float3(0.035, 0.14, 0.28);
-        float rearOpacity = Material.y * (0.18 + rearFresnel * 0.23 + rearEdge * 0.08);
-        float rearTransition = smoothstep(0.0, 0.20, -signedFacing);
-        rearGlass = lerp(grazingGlass, rearGlass, rearTransition);
-        rearOpacity = lerp(grazingOpacity, rearOpacity, rearTransition);
-        return float4(rearGlass, rearOpacity);
-    }
 
     float3 glassDirection = refract(incident, entryNormal, 1.0 / glassIor);
     float3 localDirection = normalize(mul(float4(glassDirection, 0), InverseWorld).xyz);
@@ -253,34 +227,34 @@ float4 PSMain(PSInput input) : SV_TARGET
     float fresnel = 0.035 + 0.965 * pow(1.0 - facing, 5.0);
     float exitFacing = saturate(dot(glassDirection, exitNormal));
     float exitFresnel = 0.035 + 0.965 * pow(1.0 - exitFacing, 5.0);
-    float thickness = saturate(exitDistance / 3.464);
-    float3 absorption = exp(-float3(0.13, 0.055, 0.018) * exitDistance);
+    float3 absorption = exp(-float3(0.030, 0.014, 0.004) * exitDistance);
 
     float bounceWeight = saturate(exitFresnel + (1.0 - primaryTransmission));
     float3 transmission = lerp(primaryScene, bouncedScene, bounceWeight);
 
-    float3 glass = transmission * absorption * float3(0.90, 0.98, 1.07);
-    glass = lerp(glass, surfaceReflection * 1.15, fresnel);
-    glass += fresnel * float3(0.20, 0.48, 0.82);
+    float3 glass = transmission * absorption;
+    glass = lerp(glass, surfaceReflection * 1.22 + float3(0.025, 0.035, 0.045), fresnel);
+    glass += fresnel * float3(0.08, 0.16, 0.28);
 
     // Broad edge caustics reveal both the entry surface and the refracted rear
     // geometry without turning the object back into a wireframe.
     float entryEdge = SurfaceEdgeFactor(input.LocalPosition);
     float exitEdge = SurfaceEdgeFactor(localExit);
-    glass += entryEdge * (0.06 + fresnel * 0.18) * float3(0.22, 0.62, 1.0);
-    glass += exitEdge * (0.05 + exitFresnel * 0.16) * float3(0.16, 0.52, 0.92);
+    glass += entryEdge * (0.08 + fresnel * 0.20) * float3(0.34, 0.52, 0.72);
+    glass += exitEdge * (0.06 + exitFresnel * 0.18) * float3(0.28, 0.46, 0.68);
 
     // The selected light is evaluated along the ray segment inside the cube.
     // It therefore occupies the geometric centre without a separate sphere or
     // a face-aligned glow texture.
     float closestDistance = clamp(dot(-localEntry, localDirection), 0.0, exitDistance);
     float3 closestPoint = localEntry + localDirection * closestDistance;
-    float coreGlow = Material.x * exp(-dot(closestPoint, closestPoint) * 7.5) * saturate(exitDistance * 0.55);
-    glass += coreGlow * float3(0.015, 0.34, 1.25);
+    float coreGlow = Material.x * exp(-dot(closestPoint, closestPoint) * 16.0) * saturate(exitDistance * 0.55);
+    glass += coreGlow * float3(0.015, 0.28, 1.10);
 
-    float opacity = Material.y * (0.23 + fresnel * 0.38 + thickness * 0.10 + exitFresnel * 0.08);
-    float frontTransition = smoothstep(0.0, 0.20, signedFacing);
-    glass = lerp(grazingGlass, glass, frontTransition);
-    opacity = lerp(grazingOpacity, opacity, frontTransition);
-    return float4(glass, opacity);
+    // This pass writes the final scene colour, not an independently blended
+    // transparent pane. Material.y fades the complete solid-glass result for
+    // menu transitions without exposing separately rendered rear polygons.
+    float2 screenUv = input.Position.xy * Viewport.zw;
+    float3 background = SceneBackdrop.Sample(SceneSampler, screenUv).rgb;
+    return float4(lerp(background, glass, Material.y), 1.0);
 }

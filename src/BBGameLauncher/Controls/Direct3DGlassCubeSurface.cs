@@ -53,7 +53,6 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
     private ID3D11Texture2D? _exitDepth;
     private ID3D11DepthStencilView? _exitDepthView;
     private ID3D11SamplerState? _exitSampler;
-    private ID3D11BlendState? _glassBlend;
     private ID3D11RasterizerState? _rasterizer;
 
     public Direct3DGlassCubeSurface()
@@ -118,7 +117,6 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
         _backdropSampler = e.Device.CreateSamplerState(SamplerDescription.LinearClamp);
         _sceneSampler = e.Device.CreateSamplerState(SamplerDescription.LinearClamp);
         _exitSampler = e.Device.CreateSamplerState(SamplerDescription.PointClamp);
-        _glassBlend = e.Device.CreateBlendState(BlendDescription.AlphaBlend);
         _starBlend = e.Device.CreateBlendState(BlendDescription.Additive);
         _rasterizer = e.Device.CreateRasterizerState(RasterizerDescription.CullNone);
     }
@@ -184,10 +182,12 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
         if (e.Surface.DepthStencilView != null)
             e.Context.ClearDepthStencilView(e.Surface.DepthStencilView, DepthStencilClearFlags.Depth, 1, 0);
 
-        // Transparent cube faces must not occlude one another through depth
-        // writes. Render all six surfaces in their stable mesh order instead.
-        e.Context.OMSetRenderTargets(e.Surface.ColorTextureView!, null);
-        e.Context.OMSetBlendState(_glassBlend);
+        // The shader returns a fully composited glass pixel (transmission plus
+        // reflection), so normal depth testing selects one continuous outer
+        // surface instead of alpha-layering the cube into a hollow box.
+        e.Context.OMSetRenderTargets(e.Surface.ColorTextureView!, e.Surface.DepthStencilView);
+        e.Context.OMSetBlendState(null);
+        e.Context.OMSetDepthStencilState(null);
         e.Context.RSSetState(_rasterizer);
         e.Context.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
         e.Context.IASetInputLayout(_inputLayout);
@@ -205,7 +205,7 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
 
         // Keeping one stable, frame-level order avoids the face-bucket pop the
         // old WPF implementation exhibited when rotating through a face plane.
-        foreach (var cube in _cubes.OrderByDescending(cube => cube.Size))
+        foreach (var cube in _cubes)
         {
             if (cube.Size <= .01f || cube.Opacity <= .001f) continue;
             // Move the cube along its camera ray. Its screen anchor remains in
@@ -263,7 +263,6 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
         _exitPosition?.Dispose(); _exitPosition = null;
         _exitDepthView?.Dispose(); _exitDepthView = null;
         _exitDepth?.Dispose(); _exitDepth = null;
-        _glassBlend?.Dispose(); _glassBlend = null;
         _rasterizer?.Dispose(); _rasterizer = null;
     }
 
@@ -286,13 +285,16 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
             {
                 var u = x / (float)(size - 1) * 2 - 1;
                 var v = y / (float)(size - 1) * 2 - 1;
-                // A quiet sky-like environment: point lights stay localized in
-                // reflections instead of becoming broad bands across a face.
+                // Cool-white studio strips give clear glass something bright to
+                // reflect in the otherwise dark space scene. They remain neutral
+                // so only the selected cube receives a saturated blue interior.
                 var haze = MathF.Exp(-((u - (face == 2 ? -.32f : .44f)) * (u - (face == 2 ? -.32f : .44f)) + (v + .16f) * (v + .16f)) * 8f);
+                var verticalStrip = MathF.Exp(-((u + .42f) * (u + .42f) * 46f + (v - .08f) * (v - .08f) * 2.4f));
+                var horizontalStrip = MathF.Exp(-((u - .26f) * (u - .26f) * 3.2f + (v + .58f) * (v + .58f) * 52f));
                 var star = random.NextDouble() > .9987 ? 1f : 0f;
-                var red = (byte)Math.Clamp(2 + haze * 8 + star * 176, 0, 255);
-                var green = (byte)Math.Clamp(7 + haze * 25 + star * 198, 0, 255);
-                var blue = (byte)Math.Clamp(18 + haze * 52 + star * 220, 0, 255);
+                var red = (byte)Math.Clamp(3 + haze * 16 + verticalStrip * 138 + horizontalStrip * 86 + star * 176, 0, 255);
+                var green = (byte)Math.Clamp(5 + haze * 20 + verticalStrip * 154 + horizontalStrip * 104 + star * 198, 0, 255);
+                var blue = (byte)Math.Clamp(9 + haze * 27 + verticalStrip * 174 + horizontalStrip * 132 + star * 220, 0, 255);
                 pixels[y * size + x] = 0xff000000u | ((uint)red << 16) | ((uint)green << 8) | blue;
             }
             context.UpdateSubresource(pixels, texture, (uint)face, size * sizeof(uint));
@@ -399,7 +401,7 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
 
     private static CubeVertex CreateRoundedCubeVertex(Vector3 boxPosition)
     {
-        const float bevelRadius = .10f;
+        const float bevelRadius = .035f;
         const float innerExtent = 1f - bevelRadius;
         var inner = new Vector3(innerExtent);
         var nearestInnerPoint = Vector3.Clamp(boxPosition, -inner, inner);

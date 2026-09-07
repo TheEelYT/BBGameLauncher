@@ -29,6 +29,8 @@ public partial class MainWindow : Window
     private List<LauncherMenuItem> _activeItems = [];
     private readonly List<Button> _menuButtons = [];
     private int _selectedIndex;
+    private int _rootSelectedIndex;
+    private int _settingsSelectedIndex;
     private bool _inSettings;
     private bool _isFullscreen;
     private bool _isMenuTransition;
@@ -53,7 +55,8 @@ public partial class MainWindow : Window
     {
         _inSettings = settings;
         _activeItems = items;
-        _selectedIndex = 0;
+        var rememberedIndex = settings ? _settingsSelectedIndex : _rootSelectedIndex;
+        _selectedIndex = Math.Clamp(rememberedIndex, 0, Math.Max(0, items.Count - 1));
         HintText.Text = settings ? "SYSTEM SETTINGS" : "MAIN MENU";
         DetailPanel.Child = null;
         SetDetailVisibility(false);
@@ -99,6 +102,8 @@ public partial class MainWindow : Window
             return;
 
         _selectedIndex = index;
+        if (_inSettings) _settingsSelectedIndex = index;
+        else _rootSelectedIndex = index;
         UpdateMenuSelection();
     }
 
@@ -192,7 +197,8 @@ public partial class MainWindow : Window
         if (_isMenuTransition) return;
         _isMenuTransition = true;
         var incomingItems = destinationIsSettings ? _settingsItems : _rootItems;
-        Scene.BeginCubeTransition(forward, incomingItems.Count, 0);
+        var incomingSelectedIndex = destinationIsSettings ? _settingsSelectedIndex : _rootSelectedIndex;
+        Scene.BeginCubeTransition(forward, incomingItems.Count, incomingSelectedIndex);
 
         var fadeOut = new DoubleAnimation(1, 0, TimeSpan.FromMilliseconds(250));
         fadeOut.Completed += (_, _) =>

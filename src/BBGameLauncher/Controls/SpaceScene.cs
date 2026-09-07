@@ -77,7 +77,16 @@ public sealed class SpaceScene : FrameworkElement
     {
         var transition = Math.Clamp(_motionElapsed / .42, 0, 1);
         var eased = 1 - Math.Pow(1 - transition, 3);
-        var opacity = _motion switch { CubeMotion.Exiting => 1 - eased, CubeMotion.Entering => eased, _ => 1 };
+        // Keep the depth motion's quick fly-past, but give visibility its own
+        // full-duration envelope. Multiplying both curves hides near-camera
+        // geometry smoothly instead of letting it flash at the clip plane.
+        var fade = transition * transition * (3 - 2 * transition);
+        var opacity = _motion switch
+        {
+            CubeMotion.Exiting => (1 - eased) * (1 - fade),
+            CubeMotion.Entering => eased * fade,
+            _ => 1
+        };
         var bob = Math.Sin(_elapsed * cube.Speed + cube.Phase) * 18;
         var center = new Point(cube.X * RenderSize.Width + Math.Cos(_elapsed * cube.Speed + cube.Phase) * 18,
             cube.Y * RenderSize.Height + bob);

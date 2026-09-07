@@ -163,14 +163,50 @@ float2 ProjectToUv(float3 worldPosition)
 
 float3 SampleSceneRay(float3 surfacePosition, float3 outgoingDirection, float cubeSize)
 {
+    // The captured scene represents geometry spread across the star field, not
+    // a decal sitting immediately behind the cube. Trace the outgoing ray to a
+    // distant scene plane before projecting it back into the captured image.
+    // This keeps a star localized while still allowing a rotated block to bend
+    // it, instead of stretching the same near-surface texels over an entire face.
     float2 surfaceUv = ProjectToUv(surfacePosition);
-    float2 rayUv = saturate(ProjectToUv(surfacePosition + outgoingDirection * cubeSize * 1.35));
-    float2 dispersion = (rayUv - surfaceUv) * 0.035;
+    float forwardRay = step(0.02, outgoingDirection.z);
+    float3 sceneDirection = normalize(float3(outgoingDirection.xy, max(outgoingDirection.z, 0.02)));
+    const float scenePlaneZ = 5200.0;
+    float rayDistance = (scenePlaneZ - surfacePosition.z) / sceneDirection.z;
+    rayDistance = clamp(rayDistance, cubeSize * 2.0, 7200.0);
+    float2 rayUv = ProjectToUv(surfacePosition + sceneDirection * rayDistance);
+
+    // Rays leaving the viewport see the environment rather than a clamped row
+    // of pixels. Clamping was the source of the broad, smeared star streaks.
+    float inside = step(0.0, rayUv.x) * step(rayUv.x, 1.0) *
+                   step(0.0, rayUv.y) * step(rayUv.y, 1.0);
+    float2 clampedUv = saturate(rayUv);
+
+    // A small channel separation approximates crown-glass dispersion without
+    // overwhelming the neutral transmission of an unselected cube.
+    float2 bend = rayUv - surfaceUv;
+    float2 dispersion = bend * 0.012;
     float3 scene;
-    scene.r = SceneBackdrop.Sample(SceneSampler, saturate(rayUv + dispersion)).r;
-    scene.g = SceneBackdrop.Sample(SceneSampler, rayUv).g;
-    scene.b = SceneBackdrop.Sample(SceneSampler, saturate(rayUv - dispersion)).b;
-    return scene;
+    scene.r = SceneBackdrop.Sample(SceneSampler, saturate(clampedUv + dispersion)).r;
+    scene.g = SceneBackdrop.Sample(SceneSampler, clampedUv).g;
+    scene.b = SceneBackdrop.Sample(SceneSampler, saturate(clampedUv - dispersion)).b;
+    float3 environment = EnvironmentMap.Sample(EnvironmentSampler, outgoingDirection).rgb;
+    return lerp(environment, scene, inside * forwardRay);
+}
+
+float CenterEmission(float3 localCamera, float3 localSurface)
+{
+    // Evaluate a true object-space volume centred at the origin. Using the
+    // already-refracted entry ray here made the light slide toward whichever
+    // rear face that ray happened to hit, so it looked painted onto a surface.
+    float3 viewDirection = normalize(localSurface - localCamera);
+    float closestDistance = max(dot(-localCamera, viewDirection), 0.0);
+    float3 closestPoint = localCamera + viewDirection * closestDistance;
+    float distanceSquared = dot(closestPoint, closestPoint);
+
+    float softVolume = exp(-distanceSquared * 22.0);
+    float hotCore = exp(-distanceSquared * 86.0);
+    return softVolume * 0.72 + hotCore * 0.58;
 }
 
 float SurfaceEdgeFactor(float3 localPosition)
@@ -180,6 +216,12 @@ float SurfaceEdgeFactor(float3 localPosition)
     float smallest = min(coordinates.x, min(coordinates.y, coordinates.z));
     float middle = coordinates.x + coordinates.y + coordinates.z - largest - smallest;
     return smoothstep(0.62, 0.96, middle);
+}
+
+float FresnelSchlick(float cosine)
+{
+    // Air-to-glass reflectance at normal incidence for IOR 1.50 is ~4%.
+    return 0.04 + 0.96 * pow(1.0 - saturate(cosine), 5.0);
 }
 
 float4 PSMain(PSInput input) : SV_TARGET
@@ -221,18 +263,24 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 bouncedScene = SampleSceneRay(bounceWorldExit, safeBounceOutgoing, Material.z);
     float3 bounceEnvironment = EnvironmentMap.Sample(EnvironmentSampler,
         reflect(bounceWorldDirection, bounceWorldNormal)).rgb;
-    bouncedScene = lerp(bounceEnvironment, bouncedScene, bounceTransmission);
+    float bounceExitFacing = saturate(dot(bounceWorldDirection, bounceWorldNormal));
+    float bounceExitFresnel = FresnelSchlick(bounceExitFacing);
+    bouncedScene = lerp(bounceEnvironment, bouncedScene,
+        bounceTransmission * (1.0 - bounceExitFresnel));
 
     float facing = saturate(dot(-incident, entryNormal));
-    float fresnel = 0.035 + 0.965 * pow(1.0 - facing, 5.0);
+    float fresnel = FresnelSchlick(facing);
     float exitFacing = saturate(dot(glassDirection, exitNormal));
-    float exitFresnel = 0.035 + 0.965 * pow(1.0 - exitFacing, 5.0);
-    float3 absorption = exp(-float3(0.030, 0.014, 0.004) * exitDistance);
+    float exitFresnel = FresnelSchlick(exitFacing);
+    float3 absorptionCoefficient = float3(0.030, 0.014, 0.004);
+    float3 primaryAbsorption = exp(-absorptionCoefficient * exitDistance);
+    float3 bounceAbsorption = exp(-absorptionCoefficient * (exitDistance + bounceDistance));
 
     float bounceWeight = saturate(exitFresnel + (1.0 - primaryTransmission));
-    float3 transmission = lerp(primaryScene, bouncedScene, bounceWeight);
+    float3 transmission = lerp(primaryScene * primaryAbsorption,
+        bouncedScene * bounceAbsorption, bounceWeight);
 
-    float3 glass = transmission * absorption;
+    float3 glass = transmission;
     glass = lerp(glass, surfaceReflection * 1.22 + float3(0.025, 0.035, 0.045), fresnel);
     glass += fresnel * float3(0.08, 0.16, 0.28);
 
@@ -243,13 +291,12 @@ float4 PSMain(PSInput input) : SV_TARGET
     glass += entryEdge * (0.08 + fresnel * 0.20) * float3(0.34, 0.52, 0.72);
     glass += exitEdge * (0.06 + exitFresnel * 0.18) * float3(0.28, 0.46, 0.68);
 
-    // The selected light is evaluated along the ray segment inside the cube.
-    // It therefore occupies the geometric centre without a separate sphere or
-    // a face-aligned glow texture.
-    float closestDistance = clamp(dot(-localEntry, localDirection), 0.0, exitDistance);
-    float3 closestPoint = localEntry + localDirection * closestDistance;
-    float coreGlow = Material.x * exp(-dot(closestPoint, closestPoint) * 16.0) * saturate(exitDistance * 0.55);
-    glass += coreGlow * float3(0.015, 0.28, 1.10);
+    // The selected light is a centred object-space emission volume. The broad
+    // component illuminates the glass around it while the compact component
+    // reads as the source, even as the cube rotates.
+    float3 localCamera = mul(float4(Camera.xyz, 1), InverseWorld).xyz;
+    float coreGlow = Material.x * CenterEmission(localCamera, input.LocalPosition);
+    glass += coreGlow * float3(0.018, 0.30, 1.18);
 
     // This pass writes the final scene colour, not an independently blended
     // transparent pane. Material.y fades the complete solid-glass result for

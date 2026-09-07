@@ -217,6 +217,17 @@ public sealed class Direct3DGlassCubeSurface : DrawingSurface
             var world = Matrix4x4.CreateScale(cube.Size) * rotation * Matrix4x4.CreateTranslation(position);
             Matrix4x4.Invert(world, out var inverseWorld);
 
+            // Draw the physical rear surfaces first. The front pass blends over
+            // them, so the complete transparent cube remains visible throughout
+            // rotation instead of switching between three camera-facing panels.
+            e.Context.UpdateSubresource(new ObjectConstants
+            {
+                World = world,
+                InverseWorld = inverseWorld,
+                Material = new Vector4(cube.Selected ? 1 : 0, cube.Opacity, cube.Size, 1)
+            }, _objectConstants);
+            e.Context.Draw((uint)_cubeVertexCount, 0);
+
             e.Context.UpdateSubresource(new ObjectConstants
             {
                 World = world,

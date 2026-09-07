@@ -9,7 +9,7 @@ cbuffer Object : register(b1)
 {
     row_major float4x4 World;
     row_major float4x4 InverseWorld;
-    float4 Material; // selected, opacity, cube size, unused
+    float4 Material; // selected, opacity, cube size, rear-surface pass
 };
 
 TextureCube EnvironmentMap : register(t0);
@@ -187,10 +187,30 @@ float4 PSMain(PSInput input) : SV_TARGET
     const float glassIor = 1.50;
     float3 incident = normalize(input.WorldPosition - Camera.xyz);
     float3 entryNormal = normalize(input.WorldNormal);
+    float signedFacing = dot(entryNormal, -incident);
 
-    // Shade only the first surface. The rest of the cube is traversed below as
-    // one glass volume, so its rear faces cannot appear as detached panes.
-    if (dot(entryNormal, -incident) <= 0) discard;
+    // Rear surfaces are deliberately retained. They are rendered before the
+    // front volume pass, allowing their refraction and Fresnel response to be
+    // seen through the near glass for the entire rotation.
+    if (Material.w > 0.5)
+    {
+        if (signedFacing >= 0.0) discard;
+        float rearFacing = saturate(-signedFacing);
+        float rearFresnel = 0.035 + 0.965 * pow(1.0 - rearFacing, 5.0);
+        float rearEdge = SurfaceEdgeFactor(input.LocalPosition);
+        float2 screenUv = input.Position.xy * Viewport.zw;
+        float2 rearOffset = entryNormal.xy * (0.004 + rearFresnel * 0.008);
+        float3 rearTransmission = SceneBackdrop.Sample(SceneSampler, saturate(screenUv + rearOffset)).rgb;
+        float3 rearReflection = EnvironmentMap.Sample(EnvironmentSampler, reflect(incident, entryNormal)).rgb;
+        float3 rearGlass = lerp(rearTransmission * float3(0.76, 0.90, 1.08),
+            rearReflection * 1.10, 0.16 + rearFresnel * 0.46);
+        rearGlass += rearFresnel * float3(0.10, 0.34, 0.68);
+        rearGlass += rearEdge * float3(0.035, 0.14, 0.28);
+        float rearOpacity = Material.y * (0.18 + rearFresnel * 0.23 + rearEdge * 0.08);
+        return float4(rearGlass, rearOpacity);
+    }
+
+    if (signedFacing <= 0.0) discard;
 
     float3 glassDirection = refract(incident, entryNormal, 1.0 / glassIor);
     float3 localDirection = normalize(mul(float4(glassDirection, 0), InverseWorld).xyz);
